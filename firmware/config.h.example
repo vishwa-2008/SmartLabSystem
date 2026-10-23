@@ -1,0 +1,54 @@
+/**
+ * ============================================================================
+ * KARE SMART LAB EQUIPMENT MANAGEMENT SYSTEM
+ * ESP32 Hardware Firmware Configuration Template
+ * ============================================================================
+ * Copy this file to "config.h" and replace the placeholders with your actual
+ * laboratory WiFi credentials, server endpoints, and device authentication token.
+ * 
+ * NEVER commit config.h containing real passwords or secrets to source control.
+ */
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// --- Wi-Fi Network Configuration ---
+#define WIFI_SSID           "KARE_LAB_WIFI"
+#define WIFI_PASSWORD       "YourLabWifiPassword"
+#define WIFI_TIMEOUT_MS     15000
+
+// --- Backend API Server Configuration ---
+// For local testing on the same LAN, use your development machine's local IP (e.g. 192.168.1.100)
+// For production, use your deployed HTTPS domain (e.g. "api.smartlab.klu.ac.in")
+#define API_HOST            "192.168.1.100"
+#define API_PORT            3000
+#define USE_HTTPS           false
+
+// Endpoint Paths
+#define ENDPOINT_SCAN       "/api/scan-event"
+#define ENDPOINT_HEARTBEAT  "/api/device/heartbeat"
+#define ENDPOINT_ENROLL_TASK "/api/device/enrollment-task"
+#define ENDPOINT_ENROLL_DONE "/api/device/enrollment-complete"
+
+// --- Device Authentication ---
+// Must match the DEVICE_TOKEN defined in the server's .env file
+#define DEVICE_ID           "esp32-lab-01"
+#define DEVICE_TOKEN        "1007d4fe45634146fd958879620e997ad95b72e62a1032bb8cf73d7687f25abc"
+
+// --- Hardware Pin Definitions ---
+// Fingerprint Sensor (AS608 / R307 / R503 / DY50 via HardwareSerial2)
+#define SENSOR_RX_PIN       16   // Connect to Sensor TX (Green/Yellow wire)
+#define SENSOR_TX_PIN       17   // Connect to Sensor RX (White/Blue wire)
+
+// Status Indicators
+#define LED_GREEN_PIN       2    // Success match indicator (Built-in LED on ESP32 DevKit)
+#define LED_RED_PIN         4    // Error / Disconnected indicator
+#define LED_BLUE_PIN        5    // WiFi active / Enrollment mode indicator
+#define BUZZER_PIN          18   // Piezo Buzzer for audio feedback
+
+// --- Operational Timers ---
+#define HEARTBEAT_INTERVAL_MS   30000   // 30 seconds
+#define ENROLL_CHECK_INTERVAL_MS 5000   // 5 seconds
+#define SENSOR_BAUDRATE         57600   // Standard baud rate for AS608/R307/R503
+
+#endif // CONFIG_H
