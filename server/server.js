@@ -33,13 +33,18 @@ const allowedOrigins = process.env.CORS_ORIGIN
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin) {
-        if (allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+        let isAllowed = allowedOrigins.includes("*") || allowedOrigins.includes(origin);
+        if (!isAllowed) {
+            try {
+                const host = new URL(origin).hostname;
+                if (host.endsWith(".vercel.app") || host === "localhost" || host === "127.0.0.1") {
+                    isAllowed = true;
+                }
+            } catch { /* ignore malformed origin */ }
+        }
+
+        if (isAllowed) {
             res.setHeader("Access-Control-Allow-Origin", origin);
-        } else {
-            // Allow all local development origins dynamically
-            if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-                res.setHeader("Access-Control-Allow-Origin", origin);
-            }
         }
     } else {
         res.setHeader("Access-Control-Allow-Origin", "*");
