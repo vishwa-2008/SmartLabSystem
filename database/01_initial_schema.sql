@@ -37,6 +37,16 @@ CREATE TABLE IF NOT EXISTS public.students (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Ensure all columns exist if the table was previously created with a different schema
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS reg_number TEXT UNIQUE;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS department TEXT;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS section TEXT;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS year INTEGER;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS photo_url TEXT;
+
 -- ----------------------------------------------------------------------------
 -- 3. FINGERPRINT TEMPLATES
 -- ----------------------------------------------------------------------------
@@ -65,6 +75,15 @@ CREATE TABLE IF NOT EXISTS public.equipment (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Ensure all equipment columns exist if the table was previously created with a different schema
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS asset_id TEXT UNIQUE;
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'General';
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS location TEXT DEFAULT 'Main Lab';
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'available';
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS condition TEXT DEFAULT 'good';
+ALTER TABLE public.equipment ADD COLUMN IF NOT EXISTS description TEXT;
 
 -- ----------------------------------------------------------------------------
 -- 5. EQUIPMENT TRANSACTIONS

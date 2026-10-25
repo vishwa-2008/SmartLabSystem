@@ -6,44 +6,32 @@ import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Alert } from '@/components/ui/Alert';
-import { ShieldCheck, UserCheck, KeyRound, ArrowRight } from 'lucide-react';
-import { StaffRole } from '@/types';
+import { ShieldCheck, ArrowRight, Lock } from 'lucide-react';
 
 export default function LoginPage() {
   const router = useRouter();
   const { signIn, error } = useAuth();
-  const [email, setEmail] = useState<string>('hod.ece@klu.ac.in');
-  const [password, setPassword] = useState<string>('password123');
+  const [email, setEmail] = useState<string>('');
+  const [password, setPassword] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email) {
-      setLocalError('Please enter your university email');
+    if (!email || !password) {
+      setLocalError('Please enter both your university email and password');
       return;
     }
     setLocalError(null);
     setIsSubmitting(true);
 
-    const success = await signIn(email);
-    setIsSubmitting(false);
-
-    if (success) {
-      router.push('/dashboard');
-    }
-  };
-
-  const handleQuickDemoLogin = async (role: StaffRole, demoEmail: string) => {
-    setEmail(demoEmail);
-    setIsSubmitting(true);
-    setLocalError(null);
-
-    const success = await signIn(demoEmail, role);
-    setIsSubmitting(false);
-
-    if (success) {
-      router.push('/dashboard');
+    try {
+      const success = await signIn(email.trim(), password);
+      if (success) {
+        router.push('/dashboard');
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -65,11 +53,14 @@ export default function LoginPage() {
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
         <div className="bg-white py-8 px-6 shadow-sm border border-slate-200 rounded-xl sm:px-10 space-y-6">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">
-              Staff Portal Authentication
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Access restricted to verified university laboratory personnel.
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-[#1B4998]" />
+              <h2 className="text-base font-semibold text-slate-900">
+                Staff Portal Authentication
+              </h2>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Access restricted to authorized Department Heads and Lab In-Charges.
             </p>
           </div>
 
@@ -86,6 +77,7 @@ export default function LoginPage() {
               value={email}
               onChange={e => setEmail(e.target.value)}
               placeholder="name@klu.ac.in"
+              autoComplete="email"
               required
             />
 
@@ -95,6 +87,7 @@ export default function LoginPage() {
               value={password}
               onChange={e => setPassword(e.target.value)}
               placeholder="••••••••"
+              autoComplete="current-password"
               required
             />
 
@@ -108,49 +101,10 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          {/* Quick Demo Credentials Selector */}
-          <div className="pt-4 border-t border-slate-100">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-3 text-center">
-              Evaluation & Demonstration Presets
-            </div>
-            <div className="grid grid-cols-1 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickDemoLogin('HOD', 'hod.ece@klu.ac.in')}
-                className="flex items-center justify-between p-3 rounded-lg border border-slate-200 hover:border-[#1B4998] hover:bg-blue-50/40 text-left transition-all cursor-pointer group"
-              >
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-md bg-[#1B4998]/10 text-[#1B4998] flex items-center justify-center shrink-0">
-                    <ShieldCheck className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-semibold text-slate-900 block group-hover:text-[#1B4998]">
-                      Sign in as HOD
-                    </span>
-                    <span className="text-[10px] text-slate-500">Dr. S. Ramanathan (Full Admin)</span>
-                  </div>
-                </div>
-                <KeyRound className="w-4 h-4 text-slate-300 group-hover:text-[#1B4998]" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickDemoLogin('lab_incharge', 'vijayakumar.lab@klu.ac.in')}
-                className="flex items-center justify-between p-3 rounded-lg border border-slate-200 hover:border-[#1B4998] hover:bg-blue-50/40 text-left transition-all cursor-pointer group"
-              >
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-md bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
-                    <UserCheck className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-semibold text-slate-900 block group-hover:text-[#1B4998]">
-                      Sign in as Lab In-Charge
-                    </span>
-                    <span className="text-[10px] text-slate-500">Er. K. Vijayakumar (Circulation)</span>
-                  </div>
-                </div>
-                <KeyRound className="w-4 h-4 text-slate-300 group-hover:text-[#1B4998]" />
-              </button>
+          <div className="pt-4 border-t border-slate-100 text-center">
+            <div className="flex items-center justify-center gap-1.5 text-xs text-slate-500">
+              <Lock className="w-3.5 h-3.5 text-slate-400" />
+              <span>Role-Based Access Control enforced via Supabase Auth</span>
             </div>
           </div>
         </div>

@@ -80,6 +80,7 @@ export default function StaffManagementPage() {
       email: formData.email,
       full_name: formData.full_name,
       role: formData.role,
+      password: formData.password,
       active: true
     });
 

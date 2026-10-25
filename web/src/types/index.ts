@@ -5,6 +5,29 @@
 
 export type StaffRole = 'HOD' | 'lab_incharge';
 
+export interface Laboratory {
+  id: string;
+  name: string;
+  lab_code: string;
+  department: string;
+  location: string;
+  description?: string;
+  is_active: boolean;
+  created_by?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface LabAssignment {
+  id: string;
+  lab_id: string;
+  user_id: string;
+  assigned_by?: string;
+  assigned_at: string;
+  is_active: boolean;
+  laboratories?: Laboratory;
+}
+
 export interface StaffProfile {
   id: string;
   email: string;
@@ -13,6 +36,7 @@ export interface StaffProfile {
   active: boolean;
   created_at: string;
   updated_at?: string;
+  lab_assignments?: LabAssignment[];
 }
 
 export interface Student {
@@ -27,11 +51,13 @@ export interface Student {
   photo_url?: string;
   fingerprint_enrolled?: boolean;
   template_id?: number;
+  created_by?: string;
   created_at: string;
   updated_at?: string;
+  fingerprint_templates?: { template_id: number; active: boolean; enrolled_at: string }[];
 }
 
-export type EquipmentStatus = 'available' | 'issued' | 'overdue' | 'damaged' | 'maintenance';
+export type EquipmentStatus = 'available' | 'issued' | 'overdue' | 'damaged' | 'maintenance' | 'missing';
 export type EquipmentCondition = 'good' | 'fair' | 'damaged' | 'needs_repair';
 
 export interface Equipment {
@@ -43,6 +69,9 @@ export interface Equipment {
   status: EquipmentStatus;
   condition: EquipmentCondition;
   description?: string;
+  lab_id?: string;
+  lab?: { id: string; name: string; lab_code: string };
+  created_by?: string;
   created_at: string;
   updated_at?: string;
   current_borrower?: {
@@ -69,8 +98,8 @@ export interface EquipmentTransaction {
   return_condition?: EquipmentCondition;
   issue_remarks?: string;
   return_remarks?: string;
+  lab_id?: string;
   created_at: string;
-  // Joined relation details
   student?: {
     id: string;
     reg_number: string;
@@ -84,14 +113,8 @@ export interface EquipmentTransaction {
     name: string;
     category: string;
   };
-  issuer?: {
-    full_name: string;
-    role: string;
-  };
-  returner?: {
-    full_name: string;
-    role: string;
-  };
+  issuer?: { full_name: string; role: string };
+  returner?: { full_name: string; role: string };
 }
 
 export type ScanStatus = 'matched' | 'not_found' | 'error' | 'pending';
@@ -132,8 +155,11 @@ export interface DashboardStats {
   available_equipment: number;
   overdue_equipment: number;
   damaged_equipment: number;
+  returned_equipment: number;
   today_scans: number;
   online_devices: number;
+  total_labs: number;
+  active_staff: number;
   computed_at?: string;
 }
 
@@ -147,4 +173,16 @@ export interface EnrollmentSession {
   errorMessage?: string;
   createdAt: string;
   completedAt?: string;
+}
+
+export interface AuditLog {
+  id: string;
+  actor_id?: string;
+  action: string;
+  entity_type: string;
+  entity_id?: string;
+  details?: Record<string, unknown>;
+  ip_address?: string;
+  created_at: string;
+  actor?: { full_name: string; role: string; email: string };
 }

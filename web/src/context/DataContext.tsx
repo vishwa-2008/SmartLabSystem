@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
   Student,
   Equipment,
@@ -10,18 +10,35 @@ import {
   DashboardStats,
   DeviceTelemetry,
   EquipmentCondition,
-  EnrollmentSession
+  EnrollmentSession,
+  Laboratory,
+  AuditLog
 } from '@/types';
-import {
-  INITIAL_STUDENTS,
-  INITIAL_EQUIPMENT,
-  INITIAL_TRANSACTIONS,
-  INITIAL_SCANS,
-  INITIAL_STAFF,
-  INITIAL_DEVICE_TELEMETRY
-} from '@/lib/mockData';
 import { useAuth } from './AuthContext';
 import { isSupabaseConfigured, supabase } from '@/lib/supabaseClient';
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3000';
+
+const EMPTY_STATS: DashboardStats = {
+  total_students: 0,
+  total_equipment: 0,
+  currently_issued: 0,
+  available_equipment: 0,
+  overdue_equipment: 0,
+  damaged_equipment: 0,
+  returned_equipment: 0,
+  today_scans: 0,
+  online_devices: 0,
+  total_labs: 0,
+  active_staff: 0
+};
+
+const OFFLINE_DEVICE: DeviceTelemetry = {
+  deviceId: 'esp32-lab-01',
+  status: 'offline',
+  online: false,
+  lastSeen: null
+};
 
 interface DataContextType {
   students: Student[];
@@ -29,622 +46,494 @@ interface DataContextType {
   transactions: EquipmentTransaction[];
   scans: ScanEvent[];
   staff: StaffProfile[];
+  labs: Laboratory[];
+  auditLogs: AuditLog[];
   deviceTelemetry: DeviceTelemetry;
   stats: DashboardStats;
   isLoading: boolean;
   isRefreshing: boolean;
+  realtimeConnected: boolean;
   enrollmentSession: EnrollmentSession | null;
   refreshAll: () => Promise<void>;
+  refreshStats: () => Promise<void>;
   issueEquipment: (
-    studentId: string,
-    equipmentId: string,
-    dueAt: string,
-    remarks?: string
+    studentId: string, equipmentId: string, dueAt: string, remarks?: string, labId?: string
   ) => Promise<{ success: boolean; transactionId?: string; error?: string }>;
   returnEquipment: (
-    transactionId: string,
-    condition: EquipmentCondition,
-    remarks?: string
+    transactionId: string, condition: EquipmentCondition, remarks?: string
   ) => Promise<{ success: boolean; error?: string }>;
-  addStudent: (student: Omit<Student, 'id' | 'created_at'>) => Promise<{ success: boolean; error?: string }>;
+  addStudent: (student: Omit<Student, 'id' | 'created_at'> & { lab_id?: string }) => Promise<{ success: boolean; error?: string }>;
   updateStudent: (id: string, student: Partial<Student>) => Promise<{ success: boolean; error?: string }>;
-  toggleStudentStatus: (id: string) => Promise<{ success: boolean; error?: string }>;
   addEquipment: (item: Omit<Equipment, 'id' | 'created_at'>) => Promise<{ success: boolean; error?: string }>;
   updateEquipment: (id: string, item: Partial<Equipment>) => Promise<{ success: boolean; error?: string }>;
   deleteEquipment: (id: string) => Promise<{ success: boolean; error?: string }>;
+  toggleStudentStatus: (id: string) => Promise<{ success: boolean; error?: string }>;
+  addStaff: (staffData: Omit<StaffProfile, 'id' | 'created_at' | 'updated_at'> & { password?: string; lab_ids?: string[] }) => Promise<{ success: boolean; error?: string }>;
+  toggleStaffStatus: (id: string) => Promise<{ success: boolean; error?: string }>;
+  simulateHardwareScan: (templateId: number, isTest?: boolean) => Promise<{ success: boolean; error?: string }>;
   startEnrollment: (studentId: string, templateId: number) => Promise<{ success: boolean; sessionId?: string; error?: string }>;
   cancelEnrollment: () => void;
-  simulateHardwareScan: (templateId: number, isTest?: boolean) => Promise<{ success: boolean; event?: ScanEvent; error?: string }>;
-  addStaff: (staffData: Omit<StaffProfile, 'id' | 'created_at'>) => Promise<{ success: boolean; error?: string }>;
-  toggleStaffStatus: (id: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3000';
+async function apiFetch(path: string, options?: RequestInit, token?: string | null) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> || {})
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const { currentUser } = useAuth();
-  const [students, setStudents] = useState<Student[]>(INITIAL_STUDENTS);
-  const [equipment, setEquipment] = useState<Equipment[]>(INITIAL_EQUIPMENT);
-  const [transactions, setTransactions] = useState<EquipmentTransaction[]>(INITIAL_TRANSACTIONS);
-  const [scans, setScans] = useState<ScanEvent[]>(INITIAL_SCANS);
-  const [staff, setStaff] = useState<StaffProfile[]>(INITIAL_STAFF);
-  const [deviceTelemetry, setDeviceTelemetry] = useState<DeviceTelemetry>(INITIAL_DEVICE_TELEMETRY);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [equipment, setEquipment] = useState<Equipment[]>([]);
+  const [transactions, setTransactions] = useState<EquipmentTransaction[]>([]);
+  const [scans, setScans] = useState<ScanEvent[]>([]);
+  const [staff, setStaff] = useState<StaffProfile[]>([]);
+  const [labs, setLabs] = useState<Laboratory[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [deviceTelemetry, setDeviceTelemetry] = useState<DeviceTelemetry>(OFFLINE_DEVICE);
   const [enrollmentSession, setEnrollmentSession] = useState<EnrollmentSession | null>(null);
+  const [stats, setStats] = useState<DashboardStats>(EMPTY_STATS);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [realtimeConnected, setRealtimeConnected] = useState<boolean>(false);
+  const sessionTokenRef = useRef<string | null>(null);
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
-  // Load persistent cache from localStorage
+  // Keep session token fresh
   useEffect(() => {
+    const updateToken = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      sessionTokenRef.current = session?.access_token || null;
+    };
+    updateToken();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_ev, session) => {
+      sessionTokenRef.current = session?.access_token || null;
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const fetchStats = useCallback(async () => {
+    if (!isSupabaseConfigured) return;
     try {
-      const savedStudents = localStorage.getItem('kare_students');
-      if (savedStudents) setStudents(JSON.parse(savedStudents));
+      const { data, error } = await supabase.rpc('rpc_get_dashboard_stats');
+      if (!error && data) setStats(data as DashboardStats);
+    } catch { /* silently fail stats — non-critical */ }
+  }, []);
 
-      const savedEquipment = localStorage.getItem('kare_equipment');
-      if (savedEquipment) setEquipment(JSON.parse(savedEquipment));
+  const fetchAll = useCallback(async () => {
+    if (!isSupabaseConfigured || !currentUser) return;
 
-      const savedTransactions = localStorage.getItem('kare_transactions');
-      if (savedTransactions) setTransactions(JSON.parse(savedTransactions));
+    try {
+      // Fetch labs (scoped by assignment via RLS)
+      const { data: labData } = await supabase
+        .from('laboratories')
+        .select('*')
+        .eq('is_active', true)
+        .order('name');
+      if (labData) setLabs(labData as Laboratory[]);
 
-      const savedScans = localStorage.getItem('kare_scans');
-      if (savedScans) setScans(JSON.parse(savedScans));
+      // Fetch students (RLS-scoped)
+      const { data: studentData } = await supabase
+        .from('students')
+        .select('*, fingerprint_templates(template_id, active, enrolled_at)')
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (studentData) setStudents(studentData as Student[]);
 
-      const savedStaff = localStorage.getItem('kare_staff');
-      if (savedStaff) setStaff(JSON.parse(savedStaff));
+      // Fetch equipment (RLS-scoped)
+      const { data: equipData } = await supabase
+        .from('equipment')
+        .select('*, lab:laboratories(id, name, lab_code)')
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (equipData) setEquipment(equipData as Equipment[]);
+
+      // Fetch transactions
+      const { data: txData } = await supabase
+        .from('equipment_transactions')
+        .select(`
+          *,
+          student:students(id, reg_number, full_name, department, section),
+          equipment:equipment(id, asset_id, name, category),
+          issuer:profiles!issued_by(full_name, role),
+          returner:profiles!returned_by(full_name, role)
+        `)
+        .order('issued_at', { ascending: false })
+        .limit(200);
+      if (txData) setTransactions(txData as EquipmentTransaction[]);
+
+      // Fetch scans
+      const { data: scanData } = await supabase
+        .from('scan_events')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (scanData) setScans(scanData as ScanEvent[]);
+
+      // HOD only: fetch all staff
+      if (currentUser.role === 'HOD') {
+        const { data: staffData } = await supabase
+          .from('profiles')
+          .select('*, lab_assignments(lab_id, is_active, laboratories(id, name, lab_code))')
+          .order('full_name');
+        if (staffData) setStaff(staffData as StaffProfile[]);
+
+        const { data: logsData } = await supabase
+          .from('audit_logs')
+          .select('*, actor:profiles!actor_id(full_name, role, email)')
+          .order('created_at', { ascending: false })
+          .limit(100);
+        if (logsData) setAuditLogs(logsData as AuditLog[]);
+      }
+
+      // Device status (from backend API — no auth needed for status)
+      try {
+        const statusRes = await fetch(`${API_BASE_URL}/api/device/status`);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.device) {
+            setDeviceTelemetry({
+              deviceId: statusData.device.id,
+              online: statusData.device.online,
+              status: statusData.device.online ? 'online' : 'offline',
+              lastSeen: statusData.device.lastSeen,
+              ...statusData.device.telemetry
+            });
+          }
+        }
+      } catch { /* device offline is expected */ }
+
+      await fetchStats();
     } catch (err) {
-      console.warn('Failed to parse cached local data:', err);
-    } finally {
+      console.error('Data fetch error:', err);
+    }
+  }, [currentUser, fetchStats]);
+
+  // Initial load
+  useEffect(() => {
+    if (!currentUser) {
       setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+    fetchAll().finally(() => setIsLoading(false));
+  }, [currentUser, fetchAll]);
+
+  // Set up Supabase Realtime subscriptions
+  useEffect(() => {
+    if (!isSupabaseConfigured || !currentUser) return;
+
+    // Clean up previous channel
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+    }
+
+    const channel = supabase
+      .channel('smartlab-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            setEquipment(prev => [payload.new as Equipment, ...prev]);
+          } else if (payload.eventType === 'UPDATE') {
+            setEquipment(prev => prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e));
+          } else if (payload.eventType === 'DELETE') {
+            setEquipment(prev => prev.filter(e => e.id !== payload.old.id));
+          }
+          fetchStats();
+        }
+      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment_transactions' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            // Refresh full transactions to get joined data
+            fetchAll();
+          } else if (payload.eventType === 'UPDATE') {
+            setTransactions(prev =>
+              prev.map(t => t.id === payload.new.id ? { ...t, ...payload.new } : t)
+            );
+            fetchStats();
+          }
+        }
+      )
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'students' },
+        (payload) => {
+          setStudents(prev => [payload.new as Student, ...prev]);
+          fetchStats();
+        }
+      )
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students' },
+        (payload) => {
+          setStudents(prev => prev.map(s => s.id === payload.new.id ? { ...s, ...payload.new } : s));
+        }
+      )
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'scan_events' },
+        (payload) => {
+          setScans(prev => [payload.new as ScanEvent, ...prev.slice(0, 49)]);
+          fetchStats();
+        }
+      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'laboratories' },
+        () => {
+          fetchAll();
+        }
+      )
+      .subscribe((status) => {
+        setRealtimeConnected(status === 'SUBSCRIBED');
+      });
+
+    channelRef.current = channel;
+
+    return () => {
+      supabase.removeChannel(channel);
+      channelRef.current = null;
+      setRealtimeConnected(false);
+    };
+  }, [currentUser, fetchAll, fetchStats]);
+
+  const refreshAll = useCallback(async () => {
+    setIsRefreshing(true);
+    await fetchAll();
+    setIsRefreshing(false);
+  }, [fetchAll]);
+
+  const refreshStats = useCallback(fetchStats, [fetchStats]);
+
+  // ─── ISSUE EQUIPMENT ────────────────────────────────────────────────────────
+  const issueEquipment = useCallback(async (
+    studentId: string, equipmentId: string, dueAt: string, remarks?: string, labId?: string
+  ) => {
+    try {
+      const token = sessionTokenRef.current;
+      const result = await apiFetch('/api/equipment/issue', {
+        method: 'POST',
+        body: JSON.stringify({
+          student_id: studentId, equipment_id: equipmentId,
+          due_at: dueAt, remarks, lab_id: labId
+        })
+      }, token);
+      await fetchAll();
+      return { success: true, transactionId: result.transaction_id };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to issue equipment' };
+    }
+  }, [fetchAll]);
+
+  // ─── RETURN EQUIPMENT ───────────────────────────────────────────────────────
+  const returnEquipment = useCallback(async (
+    transactionId: string, condition: EquipmentCondition, remarks?: string
+  ) => {
+    try {
+      const token = sessionTokenRef.current;
+      await apiFetch('/api/equipment/return', {
+        method: 'POST',
+        body: JSON.stringify({ transaction_id: transactionId, condition, remarks })
+      }, token);
+      await fetchAll();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to return equipment' };
+    }
+  }, [fetchAll]);
+
+  // ─── ADD STUDENT ────────────────────────────────────────────────────────────
+  const addStudent = useCallback(async (
+    studentData: Omit<Student, 'id' | 'created_at'> & { lab_id?: string }
+  ) => {
+    try {
+      const token = sessionTokenRef.current;
+      const result = await apiFetch('/api/students', {
+        method: 'POST',
+        body: JSON.stringify(studentData)
+      }, token);
+      setStudents(prev => [result as Student, ...prev]);
+      await fetchStats();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to add student' };
+    }
+  }, [fetchStats]);
+
+  // ─── UPDATE STUDENT ─────────────────────────────────────────────────────────
+  const updateStudent = useCallback(async (id: string, updates: Partial<Student>) => {
+    try {
+      const token = sessionTokenRef.current;
+      const result = await apiFetch(`/api/students/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates)
+      }, token);
+      setStudents(prev => prev.map(s => s.id === id ? { ...s, ...result } : s));
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to update student' };
     }
   }, []);
 
-  // Save changes to localStorage
-  useEffect(() => {
-    if (!isLoading) {
-      localStorage.setItem('kare_students', JSON.stringify(students));
-      localStorage.setItem('kare_equipment', JSON.stringify(equipment));
-      localStorage.setItem('kare_transactions', JSON.stringify(transactions));
-      localStorage.setItem('kare_scans', JSON.stringify(scans));
-      localStorage.setItem('kare_staff', JSON.stringify(staff));
-    }
-  }, [students, equipment, transactions, scans, staff, isLoading]);
-
-  // Telemetry polling from Express API
-  const pollDeviceStatus = useCallback(async () => {
+  // ─── ADD EQUIPMENT ──────────────────────────────────────────────────────────
+  const addEquipment = useCallback(async (item: Omit<Equipment, 'id' | 'created_at'>) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/device/status`, {
-        headers: { 'Accept': 'application/json' }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setDeviceTelemetry(prev => ({
-          ...prev,
-          online: data.device?.online ?? prev.online,
-          status: data.device?.online ? 'online' : 'offline',
-          lastSeen: data.device?.lastSeen || prev.lastSeen,
-          uptimeSeconds: data.device?.telemetry?.uptimeSeconds || prev.uptimeSeconds,
-          freeHeap: data.device?.telemetry?.freeHeap || prev.freeHeap,
-          ipAddress: data.device?.telemetry?.ipAddress || prev.ipAddress
-        }));
-
-        if (data.lastScan) {
-          setScans(prev => {
-            const exists = prev.some(s => s.id === data.lastScan.id);
-            if (!exists) {
-              const matchedStudent = students.find(st => st.id === data.lastScan.student_id);
-              const newScan: ScanEvent = {
-                ...data.lastScan,
-                student: matchedStudent ? {
-                  id: matchedStudent.id,
-                  reg_number: matchedStudent.reg_number,
-                  full_name: matchedStudent.full_name,
-                  department: matchedStudent.department,
-                  section: matchedStudent.section
-                } : null
-              };
-              return [newScan, ...prev];
-            }
-            return prev;
-          });
-        }
-      }
-    } catch {
-      // Backend not running or unreachable, preserve existing status
+      const token = sessionTokenRef.current;
+      const result = await apiFetch('/api/equipment', {
+        method: 'POST',
+        body: JSON.stringify(item)
+      }, token);
+      setEquipment(prev => [result as Equipment, ...prev]);
+      await fetchStats();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to add equipment' };
     }
-  }, [students]);
+  }, [fetchStats]);
 
-  // Set up periodic device status polling & Supabase Realtime if active
-  useEffect(() => {
-    pollDeviceStatus();
-    const interval = setInterval(pollDeviceStatus, 10000);
-
-    // If Supabase is configured, subscribe to realtime updates
-    let channel: ReturnType<typeof supabase.channel> | null = null;
-    if (isSupabaseConfigured) {
-      channel = supabase
-        .channel('smartlab_realtime')
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'scan_events' },
-          (payload) => {
-            const raw = payload.new as ScanEvent;
-            const studentMatch = students.find(s => s.id === raw.student_id);
-            setScans(prev => [{ ...raw, student: studentMatch ? {
-              id: studentMatch.id,
-              reg_number: studentMatch.reg_number,
-              full_name: studentMatch.full_name,
-              department: studentMatch.department,
-              section: studentMatch.section
-            } : null }, ...prev]);
-          }
-        )
-        .subscribe();
+  // ─── UPDATE EQUIPMENT ───────────────────────────────────────────────────────
+  const updateEquipment = useCallback(async (id: string, updates: Partial<Equipment>) => {
+    try {
+      const token = sessionTokenRef.current;
+      const result = await apiFetch(`/api/equipment/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates)
+      }, token);
+      setEquipment(prev => prev.map(e => e.id === id ? { ...e, ...result } : e));
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to update equipment' };
     }
+  }, []);
 
-    return () => {
-      clearInterval(interval);
-      if (channel) {
-        supabase.removeChannel(channel);
-      }
-    };
-  }, [pollDeviceStatus, students]);
-
-  const [stats, setStats] = useState<DashboardStats>({
-    total_students: INITIAL_STUDENTS.length,
-    total_equipment: INITIAL_EQUIPMENT.length,
-    currently_issued: 2,
-    available_equipment: 6,
-    overdue_equipment: 1,
-    damaged_equipment: 2,
-    today_scans: 4,
-    online_devices: 1,
-    computed_at: ''
-  });
-
-  // Calculate authoritative operational statistics in client effect
-  useEffect(() => {
-    const total_students = students.filter(s => s.active).length;
-    const total_equipment = equipment.length;
-    const currently_issued = equipment.filter(e => e.status === 'issued').length;
-    const available_equipment = equipment.filter(e => e.status === 'available').length;
-    const damaged_equipment = equipment.filter(e => e.status === 'damaged' || e.status === 'maintenance').length;
-
-    const now = new Date();
-    const overdue_equipment = transactions.filter(t => {
-      if (t.status !== 'active') return false;
-      return new Date(t.due_at) < now;
-    }).length;
-
-    // Today's scans count (since midnight)
-    const midnight = new Date();
-    midnight.setHours(0, 0, 0, 0);
-    const today_scans = scans.filter(s => new Date(s.created_at) >= midnight).length;
-    const online_devices = deviceTelemetry.online ? 1 : 0;
-
-    setStats({
-      total_students,
-      total_equipment,
-      currently_issued,
-      available_equipment,
-      overdue_equipment,
-      damaged_equipment,
-      today_scans,
-      online_devices,
-      computed_at: now.toISOString()
-    });
-  }, [students, equipment, transactions, scans, deviceTelemetry]);
-
-  // Refresh data
-  const refreshAll = async () => {
-    setIsRefreshing(true);
-    await pollDeviceStatus();
-    setIsRefreshing(false);
-  };
-
-  // Issue Equipment workflow (Concurrency-Safe)
-  const issueEquipment = async (
-    studentId: string,
-    equipmentId: string,
-    dueAt: string,
-    remarks?: string
-  ): Promise<{ success: boolean; transactionId?: string; error?: string }> => {
-    if (!currentUser) {
-      return { success: false, error: 'Authenticated staff session required' };
+  // ─── DELETE EQUIPMENT ───────────────────────────────────────────────────────
+  const deleteEquipment = useCallback(async (id: string) => {
+    try {
+      const token = sessionTokenRef.current;
+      await apiFetch(`/api/equipment/${id}`, { method: 'DELETE' }, token);
+      setEquipment(prev => prev.filter(e => e.id !== id));
+      await fetchStats();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to delete equipment' };
     }
+  }, [fetchStats]);
 
-    const student = students.find(s => s.id === studentId);
-    if (!student) {
-      return { success: false, error: 'Student record not found' };
-    }
-    if (!student.active) {
-      return { success: false, error: 'Inactive student cannot borrow laboratory equipment' };
-    }
-
-    const item = equipment.find(e => e.id === equipmentId);
-    if (!item) {
-      return { success: false, error: 'Equipment asset not found' };
-    }
-    if (item.status !== 'available') {
-      return { success: false, error: `Equipment is currently ${item.status} and cannot be issued` };
-    }
-    if (item.condition === 'damaged' || item.condition === 'needs_repair') {
-      return { success: false, error: `Equipment condition is ${item.condition}. Issuance prohibited.` };
-    }
-
-    const transactionId = crypto.randomUUID();
-    const nowIso = new Date().toISOString();
-
-    const newTransaction: EquipmentTransaction = {
-      id: transactionId,
-      student_id: studentId,
-      equipment_id: equipmentId,
-      issued_by: currentUser.id,
-      issued_at: nowIso,
-      due_at: dueAt,
-      status: 'active',
-      issue_remarks: remarks,
-      created_at: nowIso,
-      student: {
-        id: student.id,
-        reg_number: student.reg_number,
-        full_name: student.full_name,
-        department: student.department,
-        section: student.section
-      },
-      equipment: {
-        id: item.id,
-        asset_id: item.asset_id,
-        name: item.name,
-        category: item.category
-      },
-      issuer: {
-        full_name: currentUser.full_name,
-        role: currentUser.role
-      }
-    };
-
-    // Update equipment status
-    setEquipment(prev =>
-      prev.map(e =>
-        e.id === equipmentId
-          ? {
-              ...e,
-              status: 'issued',
-              current_borrower: {
-                student_id: student.id,
-                student_name: student.full_name,
-                reg_number: student.reg_number,
-                issued_at: nowIso,
-                due_at: dueAt
-              }
-            }
-          : e
-      )
-    );
-
-    setTransactions(prev => [newTransaction, ...prev]);
-
-    return { success: true, transactionId };
-  };
-
-  // Return Equipment workflow
-  const returnEquipment = async (
-    transactionId: string,
-    condition: EquipmentCondition,
-    remarks?: string
-  ): Promise<{ success: boolean; error?: string }> => {
-    if (!currentUser) {
-      return { success: false, error: 'Authenticated staff session required' };
-    }
-
-    const trans = transactions.find(t => t.id === transactionId);
-    if (!trans) {
-      return { success: false, error: 'Transaction record not found' };
-    }
-    if (trans.status !== 'active' && trans.status !== 'overdue') {
-      return { success: false, error: `Transaction is already marked as ${trans.status}` };
-    }
-
-    const nowIso = new Date().toISOString();
-    const isDamaged = condition === 'damaged' || condition === 'needs_repair';
-    const finalTransStatus = isDamaged ? 'damaged' : 'returned';
-    const finalEquipStatus = isDamaged ? 'damaged' : 'available';
-
-    // Update transaction
-    setTransactions(prev =>
-      prev.map(t =>
-        t.id === transactionId
-          ? {
-              ...t,
-              status: finalTransStatus,
-              return_condition: condition,
-              return_remarks: remarks,
-              returned_by: currentUser.id,
-              returned_at: nowIso,
-              returner: {
-                full_name: currentUser.full_name,
-                role: currentUser.role
-              }
-            }
-          : t
-      )
-    );
-
-    // Update equipment
-    setEquipment(prev =>
-      prev.map(e =>
-        e.id === trans.equipment_id
-          ? {
-              ...e,
-              status: finalEquipStatus,
-              condition: condition,
-              current_borrower: undefined
-            }
-          : e
-      )
-    );
-
-    return { success: true };
-  };
-
-  // Student management
-  const addStudent = async (studentData: Omit<Student, 'id' | 'created_at'>) => {
-    const exists = students.some(
-      s => s.reg_number.toLowerCase() === studentData.reg_number.toLowerCase()
-    );
-    if (exists) {
-      return { success: false, error: `Student with Registration Number ${studentData.reg_number} already exists` };
-    }
-
-    const newStudent: Student = {
-      ...studentData,
-      id: crypto.randomUUID(),
-      created_at: new Date().toISOString()
-    };
-
-    setStudents(prev => [newStudent, ...prev]);
-    return { success: true };
-  };
-
-  const updateStudent = async (id: string, updates: Partial<Student>) => {
-    if (updates.reg_number) {
-      const conflict = students.some(
-        s => s.id !== id && s.reg_number.toLowerCase() === updates.reg_number!.toLowerCase()
-      );
-      if (conflict) {
-        return { success: false, error: 'Another student already has this Registration Number' };
-      }
-    }
-
-    setStudents(prev =>
-      prev.map(s => (s.id === id ? { ...s, ...updates, updated_at: new Date().toISOString() } : s))
-    );
-    return { success: true };
-  };
-
-  const toggleStudentStatus = async (id: string) => {
-    setStudents(prev =>
-      prev.map(s => (s.id === id ? { ...s, active: !s.active, updated_at: new Date().toISOString() } : s))
-    );
-    return { success: true };
-  };
-
-  // Equipment management
-  const addEquipment = async (itemData: Omit<Equipment, 'id' | 'created_at'>) => {
-    const exists = equipment.some(
-      e => e.asset_id.toLowerCase() === itemData.asset_id.toLowerCase()
-    );
-    if (exists) {
-      return { success: false, error: `Equipment with Asset ID ${itemData.asset_id} already exists` };
-    }
-
-    const newItem: Equipment = {
-      ...itemData,
-      id: crypto.randomUUID(),
-      created_at: new Date().toISOString()
-    };
-
-    setEquipment(prev => [newItem, ...prev]);
-    return { success: true };
-  };
-
-  const updateEquipment = async (id: string, updates: Partial<Equipment>) => {
-    if (updates.asset_id) {
-      const conflict = equipment.some(
-        e => e.id !== id && e.asset_id.toLowerCase() === updates.asset_id!.toLowerCase()
-      );
-      if (conflict) {
-        return { success: false, error: 'Another item already has this Asset ID' };
-      }
-    }
-
-    setEquipment(prev =>
-      prev.map(e => (e.id === id ? { ...e, ...updates, updated_at: new Date().toISOString() } : e))
-    );
-    return { success: true };
-  };
-
-  const deleteEquipment = async (id: string) => {
-    const hasActiveLoan = transactions.some(
-      t => t.equipment_id === id && (t.status === 'active' || t.status === 'overdue')
-    );
-    if (hasActiveLoan) {
-      return {
-        success: false,
-        error: 'Cannot delete equipment that is currently issued or overdue. Complete return first.'
-      };
-    }
-
-    setEquipment(prev => prev.filter(e => e.id !== id));
-    return { success: true };
-  };
-
-  // Hardware Enrollment Workflow
-  const startEnrollment = async (studentId: string, templateId: number) => {
-    const student = students.find(s => s.id === studentId);
+  // ─── TOGGLE STUDENT STATUS ──────────────────────────────────────────────────
+  const toggleStudentStatus = useCallback(async (id: string) => {
+    const student = students.find(s => s.id === id);
     if (!student) return { success: false, error: 'Student not found' };
-
-    const session: EnrollmentSession = {
-      sessionId: crypto.randomUUID(),
-      studentId,
-      studentName: student.full_name,
-      studentReg: student.reg_number,
-      targetTemplateId: templateId,
-      status: 'waiting_device',
-      createdAt: new Date().toISOString()
-    };
-
-    setEnrollmentSession(session);
-
-    // Notify backend API if available
     try {
-      await fetch(`${API_BASE_URL}/api/enrollment/start`, {
+      const token = sessionTokenRef.current;
+      const updated = await apiFetch(`/api/students/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active: !student.active })
+      }, token);
+      setStudents(prev => prev.map(s => s.id === id ? { ...s, active: updated.active } : s));
+      await fetchStats();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to toggle student status' };
+    }
+  }, [students, fetchStats]);
+
+  // ─── STAFF MANAGEMENT ───────────────────────────────────────────────────────
+  const addStaff = useCallback(async (staffData: Omit<StaffProfile, 'id' | 'created_at' | 'updated_at'> & { password?: string; lab_ids?: string[] }) => {
+    try {
+      const token = sessionTokenRef.current;
+      await apiFetch('/api/lab-incharges', {
+        method: 'POST',
+        body: JSON.stringify(staffData)
+      }, token);
+      await fetchAll();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to create staff account' };
+    }
+  }, [fetchAll]);
+
+  const toggleStaffStatus = useCallback(async (id: string) => {
+    const member = staff.find(s => s.id === id);
+    if (!member) return { success: false, error: 'Staff member not found' };
+    try {
+      const token = sessionTokenRef.current;
+      await apiFetch(`/api/lab-incharges/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active: !member.active })
+      }, token);
+      setStaff(prev => prev.map(s => s.id === id ? { ...s, active: !member.active } : s));
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to update staff status' };
+    }
+  }, [staff]);
+
+  // ─── HARDWARE SCAN SIMULATOR (DEV/TEST) ──────────────────────────────────────
+  const simulateHardwareScan = useCallback(async (templateId: number, isTest?: boolean) => {
+    try {
+      await fetch(`${API_BASE_URL}/api/test/simulate-scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateId, isTest: isTest ?? true })
+      });
+      await fetchAll();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Simulation failed' };
+    }
+  }, [fetchAll]);
+
+  // ─── ENROLLMENT ──────────────────────────────────────────────────────────────
+  const startEnrollment = useCallback(async (studentId: string, templateId: number) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/enrollment/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ studentId, targetTemplateId: templateId })
       });
-    } catch {
-      // Backend offline, fallback in local state
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start enrollment');
+
+      const student = students.find(s => s.id === studentId);
+      const session: EnrollmentSession = {
+        sessionId: data.sessionId,
+        studentId,
+        studentName: student?.full_name,
+        studentReg: student?.reg_number,
+        targetTemplateId: templateId,
+        status: 'waiting_device',
+        createdAt: new Date().toISOString()
+      };
+      setEnrollmentSession(session);
+      return { success: true, sessionId: data.sessionId };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to start enrollment' };
     }
+  }, [students]);
 
-    return { success: true, sessionId: session.sessionId };
-  };
-
-  const cancelEnrollment = () => {
+  const cancelEnrollment = useCallback(() => {
     setEnrollmentSession(null);
-  };
-
-  // Biometric Scan Event Dispatcher / Simulator
-  const simulateHardwareScan = async (templateId: number, isTest = true) => {
-    const studentMatch = students.find(s => s.template_id === templateId);
-    const status = studentMatch ? 'matched' : 'not_found';
-
-    try {
-      // Send to Express API endpoint
-      const res = await fetch(`${API_BASE_URL}/api/test/simulate-scan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          templateId,
-          studentName: studentMatch?.full_name || 'Simulated Student',
-          status
-        })
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const event: ScanEvent = {
-          ...data.event,
-          student: studentMatch ? {
-            id: studentMatch.id,
-            reg_number: studentMatch.reg_number,
-            full_name: studentMatch.full_name,
-            department: studentMatch.department,
-            section: studentMatch.section
-          } : null
-        };
-        setScans(prev => [event, ...prev]);
-        return { success: true, event };
-      }
-    } catch {
-      // Offline fallback
-    }
-
-    const fallbackEvent: ScanEvent = {
-      id: crypto.randomUUID(),
-      template_id: templateId,
-      student_id: studentMatch?.id || null,
-      status,
-      device_id: 'esp32-lab-01',
-      is_test: isTest,
-      created_at: new Date().toISOString(),
-      student: studentMatch ? {
-        id: studentMatch.id,
-        reg_number: studentMatch.reg_number,
-        full_name: studentMatch.full_name,
-        department: studentMatch.department,
-        section: studentMatch.section
-      } : null
-    };
-
-    setScans(prev => [fallbackEvent, ...prev]);
-    return { success: true, event: fallbackEvent };
-  };
-
-  // Staff Management (HOD only)
-  const addStaff = async (staffData: Omit<StaffProfile, 'id' | 'created_at'>) => {
-    if (currentUser?.role !== 'HOD') {
-      return { success: false, error: 'Unauthorized: Only the HOD can add staff accounts' };
-    }
-
-    const exists = staff.some(s => s.email.toLowerCase() === staffData.email.toLowerCase());
-    if (exists) {
-      return { success: false, error: 'A staff member with this email address already exists' };
-    }
-
-    const newStaff: StaffProfile = {
-      ...staffData,
-      id: crypto.randomUUID(),
-      created_at: new Date().toISOString()
-    };
-
-    setStaff(prev => [...prev, newStaff]);
-    return { success: true };
-  };
-
-  const toggleStaffStatus = async (id: string) => {
-    if (currentUser?.role !== 'HOD') {
-      return { success: false, error: 'Unauthorized: Only the HOD can modify staff access' };
-    }
-
-    const target = staff.find(s => s.id === id);
-    if (!target) return { success: false, error: 'Staff record not found' };
-
-    // Prevent deactivating the last active HOD
-    if (target.role === 'HOD' && target.active) {
-      const activeHODs = staff.filter(s => s.role === 'HOD' && s.active);
-      if (activeHODs.length <= 1) {
-        return {
-          success: false,
-          error: 'Protection rule: Cannot deactivate the sole active HOD account.'
-        };
-      }
-    }
-
-    setStaff(prev =>
-      prev.map(s => (s.id === id ? { ...s, active: !s.active, updated_at: new Date().toISOString() } : s))
-    );
-    return { success: true };
-  };
+  }, []);
 
   return (
     <DataContext.Provider
       value={{
-        students,
-        equipment,
-        transactions,
-        scans,
-        staff,
-        deviceTelemetry,
-        stats,
-        isLoading,
-        isRefreshing,
+        students, equipment, transactions, scans, staff, labs, auditLogs,
+        deviceTelemetry, stats, isLoading, isRefreshing, realtimeConnected,
         enrollmentSession,
-        refreshAll,
-        issueEquipment,
-        returnEquipment,
-        addStudent,
-        updateStudent,
-        toggleStudentStatus,
-        addEquipment,
-        updateEquipment,
-        deleteEquipment,
-        startEnrollment,
-        cancelEnrollment,
+        refreshAll, refreshStats,
+        issueEquipment, returnEquipment,
+        addStudent, updateStudent, toggleStudentStatus,
+        addEquipment, updateEquipment, deleteEquipment,
+        addStaff, toggleStaffStatus,
         simulateHardwareScan,
-        addStaff,
-        toggleStaffStatus
+        startEnrollment, cancelEnrollment
       }}
     >
       {children}

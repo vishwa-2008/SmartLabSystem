@@ -1,8 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { StaffProfile, StaffRole } from '@/types';
-import { INITIAL_STAFF } from '@/lib/mockData';
 import { isSupabaseConfigured, supabase } from '@/lib/supabaseClient';
 
 interface AuthContextType {
@@ -11,93 +10,137 @@ interface AuthContextType {
   isHOD: boolean;
   isLoading: boolean;
   error: string | null;
-  signIn: (email: string, role?: StaffRole) => Promise<boolean>;
+  signIn: (email: string, password: string) => Promise<boolean>;
   signOut: () => Promise<void>;
-  switchDemoRole: (role: StaffRole) => void;
+  clearError: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+async function loadProfileForUser(userId: string): Promise<StaffProfile | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, email, full_name, role, active, created_at, updated_at')
+    .eq('id', userId)
+    .single();
+
+  if (error || !data) return null;
+  return data as StaffProfile;
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<StaffProfile | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  // On mount: restore session from Supabase if one exists
   useEffect(() => {
-    // Initialize session from localStorage or default to HOD for immediate usability
-    const savedUser = localStorage.getItem('kare_smartlab_user');
-    if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser) as StaffProfile;
-        if (parsed.active) {
-          setCurrentUser(parsed);
-        } else {
-          setCurrentUser(INITIAL_STAFF[0]);
-        }
-      } catch {
-        setCurrentUser(INITIAL_STAFF[0]);
+    let mounted = true;
+
+    const initSession = async () => {
+      if (!isSupabaseConfigured) {
+        setIsLoading(false);
+        return;
       }
-    } else {
-      // Default to HOD for demonstration
-      setCurrentUser(INITIAL_STAFF[0]);
-      localStorage.setItem('kare_smartlab_user', JSON.stringify(INITIAL_STAFF[0]));
-    }
-    setIsLoading(false);
+
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+
+        if (session?.user && mounted) {
+          const profile = await loadProfileForUser(session.user.id);
+          if (profile?.active) {
+            setCurrentUser(profile);
+          } else if (profile && !profile.active) {
+            // Account deactivated — sign out
+            await supabase.auth.signOut();
+          }
+        }
+      } catch (err) {
+        console.error('Session init error:', err);
+      } finally {
+        if (mounted) setIsLoading(false);
+      }
+    };
+
+    initSession();
+
+    // Listen for auth state changes (token refresh, sign out)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!mounted) return;
+
+        if (event === 'SIGNED_OUT' || !session) {
+          setCurrentUser(null);
+          return;
+        }
+
+        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+          if (session.user) {
+            const profile = await loadProfileForUser(session.user.id);
+            if (profile?.active) {
+              setCurrentUser(profile);
+            } else {
+              await supabase.auth.signOut();
+              setCurrentUser(null);
+              setError('Your account has been deactivated. Contact the HOD.');
+            }
+          }
+        }
+      }
+    );
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
-  const signIn = async (email: string, preferredRole?: StaffRole): Promise<boolean> => {
-    setIsLoading(true);
+  const signIn = useCallback(async (email: string, password: string): Promise<boolean> => {
     setError(null);
+    setIsLoading(true);
+
+    if (!isSupabaseConfigured) {
+      setError('Supabase is not configured. Add your project credentials to web/.env.local and restart.');
+      setIsLoading(false);
+      return false;
+    }
+
+    if (!email || !password) {
+      setError('Please enter your email and password.');
+      setIsLoading(false);
+      return false;
+    }
 
     try {
-      if (isSupabaseConfigured) {
-        // Authenticate via Supabase Auth
-        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-          email,
-          password: 'password123'
-        });
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
+        password
+      });
 
-        if (authError) {
-          throw new Error(authError.message);
+      if (authError) {
+        if (authError.message?.includes('Invalid login')) {
+          throw new Error('Invalid email or password.');
         }
-
-        if (authData.user) {
-          const { data: profile, error: profError } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', authData.user.id)
-            .single();
-
-          if (profError || !profile) {
-            throw new Error('Staff profile record not found');
-          }
-
-          if (!profile.active) {
-            throw new Error('This staff account has been deactivated. Please contact the HOD.');
-          }
-
-          setCurrentUser(profile);
-          localStorage.setItem('kare_smartlab_user', JSON.stringify(profile));
-          setIsLoading(false);
-          return true;
-        }
+        throw new Error(authError.message);
       }
 
-      // Local / Offline authentication fallback matching staff email
-      const matched = INITIAL_STAFF.find(
-        s => s.email.toLowerCase() === email.toLowerCase() || (preferredRole && s.role === preferredRole)
-      );
-
-      if (!matched) {
-        throw new Error('Invalid university staff credentials');
+      if (!authData.user) {
+        throw new Error('Authentication failed. Please try again.');
       }
 
-      if (!matched.active) {
+      const profile = await loadProfileForUser(authData.user.id);
+
+      if (!profile) {
+        await supabase.auth.signOut();
+        throw new Error('Staff profile not found. Contact the system administrator.');
+      }
+
+      if (!profile.active) {
+        await supabase.auth.signOut();
         throw new Error('This account has been deactivated. Please contact the HOD.');
       }
 
-      setCurrentUser(matched);
-      localStorage.setItem('kare_smartlab_user', JSON.stringify(matched));
+      setCurrentUser(profile);
       setIsLoading(false);
       return true;
     } catch (err: unknown) {
@@ -106,26 +149,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoading(false);
       return false;
     }
-  };
+  }, []);
 
-  const signOut = async () => {
+  const signOut = useCallback(async () => {
     setIsLoading(true);
     if (isSupabaseConfigured) {
       await supabase.auth.signOut();
     }
     setCurrentUser(null);
-    localStorage.removeItem('kare_smartlab_user');
     setIsLoading(false);
-  };
+  }, []);
 
-  const switchDemoRole = (role: StaffRole) => {
-    const target = INITIAL_STAFF.find(s => s.role === role && s.active) || INITIAL_STAFF[0];
-    setCurrentUser(target);
-    localStorage.setItem('kare_smartlab_user', JSON.stringify(target));
-  };
+  const clearError = useCallback(() => setError(null), []);
 
   const isHOD = currentUser?.role === 'HOD';
-  const isAuthenticated = Boolean(currentUser && currentUser.active);
+  const isAuthenticated = Boolean(currentUser?.active);
 
   return (
     <AuthContext.Provider
@@ -137,7 +175,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         error,
         signIn,
         signOut,
-        switchDemoRole
+        clearError
       }}
     >
       {children}
@@ -152,3 +190,27 @@ export function useAuth() {
   }
   return context;
 }
+
+// Helper hook to get the Supabase session token for API calls
+export function useSessionToken() {
+  const [token, setToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    const getToken = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      setToken(session?.access_token || null);
+    };
+    getToken();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setToken(session?.access_token || null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  return token;
+}
+
+// Role type re-export for convenience
+export type { StaffRole };
