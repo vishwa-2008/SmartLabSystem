@@ -18,7 +18,8 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
-  ShieldCheck
+  ShieldCheck,
+  Clock
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/context/AuthContext';
@@ -41,88 +42,154 @@ export function Sidebar({
   const { currentUser, isHOD, signOut } = useAuth();
   const { stats, deviceTelemetry } = useData();
 
-  const navItems = [
-    {
-      name: 'Overview',
-      href: '/dashboard',
-      icon: LayoutDashboard,
-      badge: null
-    },
-    {
-      name: 'Fingerprint Scans',
-      href: '/scans',
-      icon: Fingerprint,
-      badge: stats.today_scans > 0 ? stats.today_scans : null,
-      badgeColor: 'bg-blue-100 text-[#1B4998]'
-    },
-    {
-      name: 'Students',
-      href: '/students',
-      icon: Users,
-      badge: stats.total_students,
-      badgeColor: 'bg-slate-100 text-slate-700'
-    },
-    {
-      name: 'Equipment Inventory',
-      href: '/equipment',
-      icon: Cpu,
-      badge: stats.total_equipment,
-      badgeColor: 'bg-slate-100 text-slate-700'
-    },
-    {
-      name: 'Issue Equipment',
-      href: '/issue',
-      icon: PackagePlus,
-      badge: stats.available_equipment > 0 ? `${stats.available_equipment} avail` : null,
-      badgeColor: 'bg-emerald-100 text-emerald-800'
-    },
-    {
-      name: 'Return Equipment',
-      href: '/return',
-      icon: PackageCheck,
-      badge: stats.currently_issued > 0 ? `${stats.currently_issued} loaned` : null,
-      badgeColor: 'bg-amber-100 text-amber-800'
-    },
-    {
-      name: 'Transaction History',
-      href: '/transactions',
-      icon: History,
-      badge: null
-    },
-    {
-      name: 'Reports & Audit',
-      href: '/reports',
-      icon: FileBarChart,
-      badge: null
-    },
-    // Staff Management (HOD Only)
-    ...(isHOD
-      ? [
-          {
-            name: 'Staff Management',
-            href: '/staff',
-            icon: UserCheck,
-            badge: 'HOD',
-            badgeColor: 'bg-indigo-100 text-indigo-800 font-semibold'
-          }
-        ]
-      : []),
-    {
-      name: 'System / Device Status',
-      href: '/device',
-      icon: Activity,
-      badge: deviceTelemetry.online ? 'Online' : 'Offline',
-      badgeColor: deviceTelemetry.online
-        ? 'bg-emerald-100 text-emerald-800'
-        : 'bg-rose-100 text-rose-800'
-    },
-    {
-      name: 'Settings',
-      href: '/settings',
-      icon: Settings,
-      badge: null
-    }
-  ];
+  // Role-tailored navigation items
+  const navItems = isHOD
+    ? [
+        {
+          name: 'HOD Overview',
+          href: '/dashboard',
+          icon: LayoutDashboard,
+          badge: null
+        },
+        {
+          name: 'Outstanding Loans',
+          href: '/outstanding',
+          icon: Clock,
+          badge: stats.currently_issued > 0 ? `${stats.currently_issued} active` : null,
+          badgeColor: stats.overdue_equipment > 0 ? 'bg-rose-100 text-rose-800 font-semibold' : 'bg-amber-100 text-amber-800'
+        },
+        {
+          name: 'Equipment Inventory',
+          href: '/equipment',
+          icon: Cpu,
+          badge: stats.total_equipment,
+          badgeColor: 'bg-slate-100 text-slate-700'
+        },
+        {
+          name: 'Students Registry',
+          href: '/students',
+          icon: Users,
+          badge: stats.total_students,
+          badgeColor: 'bg-slate-100 text-slate-700'
+        },
+        {
+          name: 'Issue Equipment',
+          href: '/issue',
+          icon: PackagePlus,
+          badge: stats.available_equipment > 0 ? `${stats.available_equipment} avail` : null,
+          badgeColor: 'bg-emerald-100 text-emerald-800'
+        },
+        {
+          name: 'Return Equipment',
+          href: '/return',
+          icon: PackageCheck,
+          badge: null
+        },
+        {
+          name: 'Live Scans',
+          href: '/scans',
+          icon: Fingerprint,
+          badge: stats.today_scans > 0 ? stats.today_scans : null,
+          badgeColor: 'bg-blue-100 text-[#1B4998]'
+        },
+        {
+          name: 'Transaction History',
+          href: '/transactions',
+          icon: History,
+          badge: null
+        },
+        {
+          name: 'Staff Management',
+          href: '/staff',
+          icon: UserCheck,
+          badge: 'HOD',
+          badgeColor: 'bg-indigo-100 text-indigo-800 font-semibold'
+        },
+        {
+          name: 'Reports & Audit',
+          href: '/reports',
+          icon: FileBarChart,
+          badge: null
+        },
+        {
+          name: 'Device Status',
+          href: '/device',
+          icon: Activity,
+          badge: deviceTelemetry.online ? 'Online' : 'Offline',
+          badgeColor: deviceTelemetry.online
+            ? 'bg-emerald-100 text-emerald-800'
+            : 'bg-rose-100 text-rose-800'
+        }
+      ]
+    : [
+        {
+          name: 'Lab Dashboard',
+          href: '/dashboard',
+          icon: LayoutDashboard,
+          badge: null
+        },
+        {
+          name: 'Scan Student',
+          href: '/scan',
+          icon: Fingerprint,
+          highlight: true,
+          badge: stats.today_scans > 0 ? `${stats.today_scans} today` : 'Ready',
+          badgeColor: 'bg-[#1B4998]/10 text-[#1B4998] font-semibold'
+        },
+        {
+          name: 'Not Returned',
+          href: '/outstanding',
+          icon: Clock,
+          badge: stats.currently_issued > 0 ? `${stats.currently_issued}` : null,
+          badgeColor: stats.overdue_equipment > 0 ? 'bg-rose-100 text-rose-800 font-semibold' : 'bg-amber-100 text-amber-800 font-semibold'
+        },
+        {
+          name: 'Issue Equipment',
+          href: '/issue',
+          icon: PackagePlus,
+          badge: stats.available_equipment > 0 ? `${stats.available_equipment}` : null,
+          badgeColor: 'bg-emerald-100 text-emerald-800'
+        },
+        {
+          name: 'Return Equipment',
+          href: '/return',
+          icon: PackageCheck,
+          badge: null
+        },
+        {
+          name: 'Lab Equipment',
+          href: '/equipment',
+          icon: Cpu,
+          badge: null
+        },
+        {
+          name: 'Students',
+          href: '/students',
+          icon: Users,
+          badge: null
+        },
+        {
+          name: 'History',
+          href: '/transactions',
+          icon: History,
+          badge: null
+        },
+        {
+          name: 'Reports',
+          href: '/reports',
+          icon: FileBarChart,
+          badge: null
+        },
+        {
+          name: 'Device Status',
+          href: '/device',
+          icon: Activity,
+          badge: deviceTelemetry.online ? 'Online' : 'Offline',
+          badgeColor: deviceTelemetry.online
+            ? 'bg-emerald-100 text-emerald-800'
+            : 'bg-rose-100 text-rose-800'
+        }
+      ];
 
   return (
     <>
@@ -189,6 +256,8 @@ export function Sidebar({
                   'group flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors relative',
                   isActive
                     ? 'bg-[#1B4998] text-white shadow-xs'
+                    : 'highlight' in item && item.highlight
+                    ? 'bg-[#1B4998]/10 text-[#1B4998] hover:bg-[#1B4998]/15 border border-[#1B4998]/30 font-semibold'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
                 )}
                 title={isCollapsed ? item.name : undefined}
@@ -196,7 +265,11 @@ export function Sidebar({
                 <Icon
                   className={cn(
                     'w-5 h-5 shrink-0 transition-colors',
-                    isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-600'
+                    isActive
+                      ? 'text-white'
+                      : 'highlight' in item && item.highlight
+                      ? 'text-[#1B4998]'
+                      : 'text-slate-400 group-hover:text-slate-600'
                   )}
                 />
                 {!isCollapsed && (

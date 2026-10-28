@@ -95,17 +95,26 @@ export interface EquipmentTransaction {
   returned_by?: string;
   returned_at?: string;
   status: TransactionStatus;
+  issue_condition?: EquipmentCondition;
   return_condition?: EquipmentCondition;
   issue_remarks?: string;
   return_remarks?: string;
   lab_id?: string;
   created_at: string;
+  is_overdue?: boolean;
+  hours_outstanding?: number;
+  laboratory?: {
+    id: string;
+    name: string;
+    lab_code: string;
+  };
   student?: {
     id: string;
     reg_number: string;
     full_name: string;
     department: string;
     section: string;
+    year?: number;
   };
   equipment?: {
     id: string;
@@ -115,6 +124,7 @@ export interface EquipmentTransaction {
   };
   issuer?: { full_name: string; role: string };
   returner?: { full_name: string; role: string };
+  issued_by_staff?: { full_name: string; role: string };
 }
 
 export type ScanStatus = 'matched' | 'not_found' | 'error' | 'pending';

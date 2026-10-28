@@ -13,7 +13,7 @@ import { Alert } from '@/components/ui/Alert';
 import { useData } from '@/context/DataContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatDate } from '@/lib/utils';
-import { Student, Equipment } from '@/types';
+import { Student, Equipment, EquipmentCondition } from '@/types';
 import {
   PackagePlus,
   Fingerprint,
@@ -35,14 +35,18 @@ function IssueEquipmentContent() {
   const {
     students,
     equipment,
+    transactions,
+    labs,
     scans,
     issueEquipment
   } = useData();
-  const { currentUser } = useAuth();
+  const { currentUser, isHOD } = useAuth();
 
   const [studentSearch, setStudentSearch] = useState<string>('');
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<string>('');
+  const [selectedLabId, setSelectedLabId] = useState<string>('all');
+  const [issueCondition, setIssueCondition] = useState<EquipmentCondition>('good');
   const [dueDate, setDueDate] = useState<string>('');
   const [remarks, setRemarks] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -86,10 +90,18 @@ function IssueEquipmentContent() {
     }
   }, [scans, students, selectedStudent]);
 
-  // Available equipment list
-  const availableEquipment = equipment.filter(
-    e => e.status === 'available' && e.condition !== 'damaged' && e.condition !== 'needs_repair'
-  );
+  // Check active and overdue loans for selected student
+  const studentLoans = selectedStudent
+    ? transactions.filter(t => t.student_id === selectedStudent.id && t.status === 'active')
+    : [];
+  const hasOverdue = studentLoans.some(t => new Date(t.due_at) < new Date());
+
+  // Available equipment list filtered by status and selected lab
+  const availableEquipment = equipment.filter(e => {
+    const isAvail = e.status === 'available' && e.condition !== 'damaged' && e.condition !== 'needs_repair';
+    const matchesLab = selectedLabId === 'all' || e.lab_id === selectedLabId;
+    return isAvail && matchesLab;
+  });
 
   // Filter students for search dropdown
   const searchResults = students
@@ -124,7 +136,9 @@ function IssueEquipmentContent() {
       selectedStudent.id,
       selectedEquipmentId,
       dueDateTime,
-      remarks
+      remarks,
+      targetItem?.lab_id,
+      issueCondition
     );
 
     setIsSubmitting(false);
@@ -275,14 +289,19 @@ function IssueEquipmentContent() {
                       </span>
                     </div>
                     <div>
-                      <span className="text-slate-500 block text-[10px]">BIOMETRIC SLOT</span>
-                      <span className="font-mono font-medium text-emerald-700">
-                        {selectedStudent.fingerprint_enrolled
-                          ? `#${selectedStudent.template_id}`
-                          : 'Not Enrolled'}
+                      <span className="text-slate-500 block text-[10px]">ACTIVE HOLDINGS</span>
+                      <span className={`font-bold ${hasOverdue ? 'text-rose-600' : 'text-slate-800'}`}>
+                        {studentLoans.length} loan(s) {hasOverdue && '⚠️ OVERDUE'}
                       </span>
                     </div>
                   </div>
+
+                  {hasOverdue && (
+                    <div className="p-2.5 rounded bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center gap-2 mt-1">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>This student has past-due equipment. Clear overdue loans before issuing further instruments.</span>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="p-4 rounded-lg border border-dashed border-slate-300 text-center text-xs text-slate-400">
@@ -308,13 +327,37 @@ function IssueEquipmentContent() {
                   </Alert>
                 )}
 
+                {/* Lab Filter */}
+                {labs.length > 1 && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Filter Equipment by Laboratory
+                    </label>
+                    <select
+                      value={selectedLabId}
+                      onChange={e => {
+                        setSelectedLabId(e.target.value);
+                        setSelectedEquipmentId('');
+                      }}
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#1B4998]"
+                    >
+                      <option value="all">All Available Laboratories ({availableEquipment.length} items)</option>
+                      {labs.map(l => (
+                        <option key={l.id} value={l.id}>
+                          {l.name} ({l.lab_code})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <Select
-                  label="Select Available Laboratory Equipment"
+                  label="Select Available Laboratory Equipment *"
                   value={selectedEquipmentId}
                   onChange={e => setSelectedEquipmentId(e.target.value)}
                   required
                 >
-                  <option value="">-- Choose available instrument or kit --</option>
+                  <option value="">-- Choose available instrument or kit ({availableEquipment.length} available) --</option>
                   {availableEquipment.map(eq => (
                     <option key={eq.id} value={eq.id}>
                       {eq.asset_id} • {eq.name} ({eq.category} - {eq.location})
@@ -322,10 +365,25 @@ function IssueEquipmentContent() {
                   ))}
                 </Select>
 
+                {/* Condition at Issue */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      Return Due Date
+                      Equipment Condition at Issue *
+                    </label>
+                    <select
+                      value={issueCondition}
+                      onChange={e => setIssueCondition(e.target.value as EquipmentCondition)}
+                      className="flex h-9 w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1B4998]"
+                    >
+                      <option value="good">Good (Fully functional, verified)</option>
+                      <option value="fair">Fair (Usable, minor wear)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Return Due Date *
                     </label>
                     <div className="flex gap-2">
                       <input
@@ -372,14 +430,14 @@ function IssueEquipmentContent() {
                       </button>
                     </div>
                   </div>
-
-                  <Input
-                    label="Issue Remarks / Lab Assignment"
-                    placeholder="e.g. Embedded Lab Experiment 3, Mini-Project"
-                    value={remarks}
-                    onChange={e => setRemarks(e.target.value)}
-                  />
                 </div>
+
+                <Input
+                  label="Issue Remarks / Lab Experiment Assignment"
+                  placeholder="e.g. Embedded Lab Experiment 3, Final Year Capstone Project"
+                  value={remarks}
+                  onChange={e => setRemarks(e.target.value)}
+                />
 
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                   <div className="text-xs text-slate-500">

@@ -39,6 +39,28 @@ export function formatTime(dateString: string | undefined | null): string {
   }
 }
 
+export function formatRelativeTime(dateString: string | undefined | null): string {
+  if (!dateString) return '-';
+  try {
+    const d = new Date(dateString);
+    if (isNaN(d.getTime())) return '-';
+    const now = Date.now();
+    const diffMs = now - d.getTime();
+    const diffSec = Math.floor(Math.abs(diffMs) / 1000);
+    const isPast = diffMs > 0;
+
+    if (diffSec < 60) return isPast ? 'just now' : 'in a few seconds';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return isPast ? `${diffMin}m ago` : `in ${diffMin}m`;
+    const diffHour = Math.floor(diffMin / 60);
+    if (diffHour < 24) return isPast ? `${diffHour}h ago` : `in ${diffHour}h`;
+    const diffDay = Math.floor(diffHour / 24);
+    return isPast ? `${diffDay}d ago` : `in ${diffDay}d`;
+  } catch {
+    return dateString;
+  }
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);

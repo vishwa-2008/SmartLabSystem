@@ -1,6 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -17,19 +19,26 @@ import {
   CheckCircle2,
   AlertTriangle,
   Cpu,
-  UserCheck
+  UserCheck,
+  Clock,
+  ArrowLeft
 } from 'lucide-react';
 
-export default function ReturnEquipmentPage() {
+function ReturnEquipmentContent() {
+  const searchParams = useSearchParams();
+  const initialTxId = searchParams?.get('transactionId') || '';
+  const initialStudentId = searchParams?.get('studentId') || '';
+
   const {
     students,
     transactions,
-    returnEquipment
+    returnEquipment,
+    refreshStats
   } = useData();
 
   const [studentSearch, setStudentSearch] = useState<string>('');
-  const [selectedStudentId, setSelectedStudentId] = useState<string>('');
-  const [selectedTransactionId, setSelectedTransactionId] = useState<string>('');
+  const [selectedStudentId, setSelectedStudentId] = useState<string>(initialStudentId);
+  const [selectedTransactionId, setSelectedTransactionId] = useState<string>(initialTxId);
   const [returnCondition, setReturnCondition] = useState<EquipmentCondition>('good');
   const [remarks, setRemarks] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -40,6 +49,17 @@ export default function ReturnEquipmentPage() {
   const activeTransactions = transactions.filter(
     t => t.status === 'active' || t.status === 'overdue'
   );
+
+  // If initialTxId provided in query, find borrower student
+  useEffect(() => {
+    if (initialTxId && activeTransactions.length > 0) {
+      const match = activeTransactions.find(t => t.id === initialTxId);
+      if (match) {
+        setSelectedTransactionId(match.id);
+        setSelectedStudentId(match.student_id);
+      }
+    }
+  }, [initialTxId, activeTransactions]);
 
   // Students who currently have active loans
   const studentsWithLoans = students.filter(s =>
@@ -85,21 +105,30 @@ export default function ReturnEquipmentPage() {
       setSelectedTransactionId('');
       setRemarks('');
       setReturnCondition('good');
+      await refreshStats();
     }
   };
 
   return (
-    <AppLayout>
+    <div className="space-y-6 max-w-7xl mx-auto">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <RotateCcw className="w-6 h-6 text-[#1B4998]" />
             Return Equipment & Technical Inspection
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
+          </h1>
+          <p className="text-sm text-slate-500 mt-1">
             Check-in borrowed laboratory assets, inspect hardware condition, and close loan records.
           </p>
         </div>
+
+        <Link href="/outstanding">
+          <Button variant="outline" size="sm" className="flex items-center gap-1.5">
+            <Clock className="w-4 h-4" />
+            View All Not Returned ({activeTransactions.length})
+          </Button>
+        </Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -119,7 +148,7 @@ export default function ReturnEquipmentPage() {
 
           {/* Step 1: Select Student with Active Loans */}
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between">
               <div className="flex items-center gap-2">
                 <UserCheck className="w-4 h-4 text-[#1B4998]" />
                 <CardTitle>Step 1: Select Student Borrower</CardTitle>
@@ -136,11 +165,11 @@ export default function ReturnEquipmentPage() {
                   placeholder="Filter student by name or registration number..."
                   value={studentSearch}
                   onChange={e => setStudentSearch(e.target.value)}
-                  className="w-full pl-9 pr-4 py-1.5 text-sm rounded-md border border-slate-300 focus:outline-none focus:ring-2 focus:ring-[#1B4998]"
+                  className="w-full pl-9 pr-4 py-2 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-[#1B4998]"
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto">
                 {filteredStudentsWithLoans.length === 0 ? (
                   <div className="col-span-2 p-6 text-center text-xs text-slate-400 border border-dashed rounded-lg">
                     No active borrower matches the search query.
@@ -192,7 +221,7 @@ export default function ReturnEquipmentPage() {
               <CardHeader>
                 <div className="flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-[#1B4998]" />
-                  <CardTitle>Step 2: Select Item Being Returned</CardTitle>
+                  <CardTitle>Step 2: Select Item Being Returned & Inspect</CardTitle>
                 </div>
               </CardHeader>
               <CardContent>
@@ -200,7 +229,7 @@ export default function ReturnEquipmentPage() {
                   <div className="space-y-2">
                     {studentLoans.map(loan => {
                       const isSelected = selectedTransactionId === loan.id;
-                      const isOverdue = loan.status === 'overdue';
+                      const isOverdue = new Date(loan.due_at) < new Date();
 
                       return (
                         <div
@@ -229,7 +258,7 @@ export default function ReturnEquipmentPage() {
                             </div>
                             {loan.issue_remarks && (
                               <div className="text-[11px] text-slate-400 italic mt-0.5">
-                                Remarks: "{loan.issue_remarks}"
+                                Remarks: &quot;{loan.issue_remarks}&quot;
                               </div>
                             )}
                           </div>
@@ -254,7 +283,7 @@ export default function ReturnEquipmentPage() {
                     <div className="pt-4 border-t border-slate-100 space-y-4">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <Select
-                          label="Return Physical Condition Inspection"
+                          label="Return Physical Condition Inspection *"
                           value={returnCondition}
                           onChange={e =>
                             setReturnCondition(e.target.value as EquipmentCondition)
@@ -287,9 +316,10 @@ export default function ReturnEquipmentPage() {
                         <Button
                           type="submit"
                           isLoading={isSubmitting}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white"
                           leftIcon={<RotateCcw className="w-4 h-4" />}
                         >
-                          Confirm Equipment Return
+                          Confirm Return & Restock
                         </Button>
                       </div>
                     </div>
@@ -310,11 +340,11 @@ export default function ReturnEquipmentPage() {
               </div>
             </CardHeader>
             <CardContent className="space-y-3 text-xs text-slate-600 leading-relaxed">
-              <div className="p-2.5 rounded bg-slate-50 border border-slate-200">
+              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
                 <span className="font-bold text-slate-900 block mb-0.5">Physical Verification</span>
                 Inspect accessories (oscilloscope probes, power adapters, USB cables) before confirming return.
               </div>
-              <div className="p-2.5 rounded bg-slate-50 border border-slate-200">
+              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
                 <span className="font-bold text-slate-900 block mb-0.5">Audit Integrity</span>
                 Return operations write an authoritative timestamp into <code>equipment_transactions</code>. Historical records are preserved forever.
               </div>
@@ -322,6 +352,16 @@ export default function ReturnEquipmentPage() {
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+export default function ReturnEquipmentPage() {
+  return (
+    <AppLayout title="Return Equipment">
+      <Suspense fallback={<div className="p-12 text-center text-sm text-slate-500">Loading Return Desk...</div>}>
+        <ReturnEquipmentContent />
+      </Suspense>
     </AppLayout>
   );
 }

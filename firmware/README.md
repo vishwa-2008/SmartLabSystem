@@ -87,3 +87,26 @@ Additional Peripherals:
 - For production HTTPS:
   - Set `USE_HTTPS true` in `config.h`.
   - Use `WiFiClientSecure` and load the root CA certificate of your server's SSL certificate to prevent MITM attacks.
+
+---
+
+## 6. Physical Fingerprint Enrollment Procedure
+
+In this production architecture, biometric fingerprint enrollment is performed directly on the optical sensor (or via the official Adafruit Enroll sketch) to ensure biometric privacy, template security, and zero web-network vulnerabilities:
+
+### Option A: Using the Adafruit Enroll Example Sketch
+1. Open the Arduino IDE.
+2. Go to **File > Examples > Adafruit Fingerprint Sensor Library > enroll**.
+3. Adjust the serial pins to match your wiring:
+   ```cpp
+   HardwareSerial mySerial(2);
+   Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+   // In setup:
+   mySerial.begin(57600, SERIAL_8N1, 16, 17);
+   ```
+4. Upload to the ESP32 and open the Serial Monitor at 9600 baud.
+5. Type the target Template ID (e.g., `1`, `2`, `3`) to store.
+6. Follow the prompt: place the finger twice to generate and store the template in the sensor's non-volatile flash.
+7. Map that Template ID to the student in the Web Database (e.g. `template_id = 1` in `students` or `fingerprint_templates`).
+8. Re-flash `smart_lab_fingerprint.ino`. The sensor will now recognize that student instantly on every scan!
+

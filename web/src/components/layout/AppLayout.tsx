@@ -7,7 +7,12 @@ import { useAuth } from '@/context/AuthContext';
 import { Loader2 } from 'lucide-react';
 import Link from 'next/link';
 
-export function AppLayout({ children }: { children: React.ReactNode }) {
+interface AppLayoutProps {
+  children: React.ReactNode;
+  title?: string;
+}
+
+export function AppLayout({ children, title }: AppLayoutProps) {
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
   const [mobileOpen, setMobileOpen] = useState<boolean>(false);
   const { isAuthenticated, isLoading } = useAuth();

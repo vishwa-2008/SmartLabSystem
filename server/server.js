@@ -130,8 +130,6 @@ const supabase = createClient(
 const inMemoryState = {
     latestHeartbeats: {},
     lastScanEvent: null,
-    pendingEnrollmentTask: null,
-    enrollmentSessions: {},
     inMemoryScans: []
 };
 
@@ -174,7 +172,8 @@ app.get("/health", (_req, res) => {
 });
 
 /**
- * 2. Fingerprint Scan Event endpoint (Preserved and enhanced with test flag)
+ * 2. Fingerprint Scan Event endpoint
+ *    Accepts a scan from ESP32. Looks up the student and returns their details.
  */
 app.post("/api/scan-event", async (req, res) => {
     if (!deviceAuthorized(req)) {
@@ -240,6 +239,17 @@ app.post("/api/scan-event", async (req, res) => {
                 }
             }
 
+            // Fetch full student details for the response
+            let studentDetails = null;
+            if (studentId) {
+                const { data: sd } = await supabase
+                    .from("students")
+                    .select("id, reg_number, full_name, department, section, year")
+                    .eq("id", studentId)
+                    .single();
+                studentDetails = sd || null;
+            }
+
             const { data: event, error: insertError } =
                 await supabase
                     .from("scan_events")
@@ -260,38 +270,61 @@ app.post("/api/scan-event", async (req, res) => {
                 });
             }
 
-            inMemoryState.lastScanEvent = event;
+            inMemoryState.lastScanEvent = { ...event, student: studentDetails };
             return res.status(201).json({
                 success: true,
-                event
+                event,
+                student: studentDetails
             });
         } else {
-            // Local fallback simulation when Supabase credentials are placeholder
+            // Local test fallback (Supabase not configured)
             const simulatedEvent = {
                 id: crypto.randomUUID(),
                 template_id: templateId,
                 status: templateId <= 5 ? "matched" : "not_found",
-                student_id: templateId <= 5 ? `a0000001-0000-0000-0000-00000000000${templateId}` : null,
+                student_id: null,
                 device_id: deviceId,
                 is_test: isTest,
                 created_at: new Date().toISOString()
             };
-
             inMemoryState.lastScanEvent = simulatedEvent;
             inMemoryState.inMemoryScans.unshift(simulatedEvent);
             if (inMemoryState.inMemoryScans.length > 50) inMemoryState.inMemoryScans.pop();
-
             return res.status(201).json({
                 success: true,
                 event: simulatedEvent,
+                student: null,
                 note: "Operating in local test mode (Supabase URL is placeholder)"
             });
         }
     } catch (error) {
         console.error("Unexpected scan error:", error);
-        return res.status(500).json({
-            error: "Unexpected server error"
+        return res.status(500).json({ error: "Unexpected server error" });
+    }
+});
+
+/**
+ * 2b. GET /api/scan/latest — returns the most recent scan with student details
+ *     Used by Lab In-charge scan page to poll for latest result
+ */
+app.get("/api/scan/latest", requireAuth, async (req, res) => {
+    try {
+        if (!isSupabaseConfigured) {
+            return res.json({ scan: inMemoryState.lastScanEvent || null, student: null });
+        }
+        const { data: scan, error } = await supabase
+            .from("scan_events")
+            .select("*, student:students(id, reg_number, full_name, department, section, year)")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single();
+        if (error) return res.json({ scan: null, student: null });
+        return res.json({
+            scan: scan || null,
+            student: scan?.student || null
         });
+    } catch (err) {
+        return res.status(500).json({ error: "Failed to fetch latest scan" });
     }
 });
 
@@ -377,126 +410,59 @@ app.get("/api/device/status", async (_req, res) => {
 });
 
 /**
- * 5. Hardware Enrollment Handshake endpoints
+ * [REMOVED] Hardware Enrollment Handshake endpoints were removed per system redesign.
+ * Fingerprint enrollment is now performed directly on the sensor via Serial Monitor.
+ * See firmware/README.md for the physical enrollment process.
+ *
+ * Removed routes:
+ *   POST /api/enrollment/start
+ *   GET  /api/device/enrollment-task
+ *   POST /api/device/enrollment-complete
+ *   GET  /api/enrollment/status/:sessionId
  */
-// Staff initiates enrollment for student
-app.post("/api/enrollment/start", (req, res) => {
-    const { studentId, targetTemplateId } = req.body || {};
-
-    if (!studentId || !targetTemplateId) {
-        return res.status(400).json({ error: "studentId and targetTemplateId are required" });
-    }
-
-    const sessionId = crypto.randomUUID();
-    const session = {
-        sessionId,
-        studentId,
-        targetTemplateId: Number(targetTemplateId),
-        status: "waiting_device",
-        createdAt: new Date().toISOString()
-    };
-
-    inMemoryState.pendingEnrollmentTask = session;
-    inMemoryState.enrollmentSessions[sessionId] = session;
-
-    return res.status(201).json({
-        success: true,
-        sessionId,
-        status: "waiting_device",
-        targetTemplateId: Number(targetTemplateId)
-    });
-});
-
-// ESP32 checks for pending enrollment work
-app.get("/api/device/enrollment-task", (req, res) => {
-    if (!deviceAuthorized(req)) {
-        return res.status(401).json({ error: "Device not authorized" });
-    }
-
-    if (inMemoryState.pendingEnrollmentTask) {
-        return res.json({
-            hasTask: true,
-            sessionId: inMemoryState.pendingEnrollmentTask.sessionId,
-            targetTemplateId: inMemoryState.pendingEnrollmentTask.targetTemplateId
-        });
-    }
-
-    return res.json({ hasTask: false });
-});
-
-// ESP32 reports completion of enrollment
-app.post("/api/device/enrollment-complete", async (req, res) => {
-    if (!deviceAuthorized(req)) {
-        return res.status(401).json({ error: "Device not authorized" });
-    }
-
-    const { sessionId, templateId, status, errorMessage } = req.body || {};
-    const session = inMemoryState.enrollmentSessions[sessionId];
-
-    if (session) {
-        session.status = status === "enrolled" ? "enrolled" : "failed";
-        session.errorMessage = errorMessage || null;
-        session.completedAt = new Date().toISOString();
-
-        if (status === "enrolled" && isSupabaseConfigured) {
-            try {
-                await supabase.from("fingerprint_templates").upsert({
-                    template_id: templateId,
-                    student_id: session.studentId,
-                    active: true,
-                    enrolled_at: new Date().toISOString()
-                }, { onConflict: "template_id" });
-            } catch (err) {
-                console.error("Failed to persist enrolled template:", err.message);
-            }
-        }
-    }
-
-    inMemoryState.pendingEnrollmentTask = null;
-    return res.json({ success: true });
-});
-
-// Staff portal polls enrollment status
-app.get("/api/enrollment/status/:sessionId", (req, res) => {
-    const session = inMemoryState.enrollmentSessions[req.params.sessionId];
-    if (!session) {
-        return res.status(404).json({ error: "Enrollment session not found" });
-    }
-    return res.json(session);
-});
 
 /**
- * 6. Test Scan Simulator (Safe development endpoint marked with isTest flag)
+ * 5b. Scan Simulator — HOD only, for testing without hardware
  */
-app.post("/api/test/simulate-scan", (req, res) => {
+// Staff initiates enrollment for student
+app.post("/api/test/simulate-scan", requireAuth, (req, res) => {
+    if (req.actor?.role !== "HOD") {
+        return res.status(403).json({ error: "HOD authorization required for scan simulation" });
+    }
     const templateId = Number(req.body?.templateId || 1);
-    const studentName = req.body?.studentName || "Simulated Student";
     const status = req.body?.status || (templateId > 0 && templateId <= 5 ? "matched" : "not_found");
-
     const event = {
         id: crypto.randomUUID(),
         template_id: templateId,
-        student_id: templateId <= 5 ? `a0000001-0000-0000-0000-00000000000${templateId}` : null,
-        status: status,
+        student_id: null,
+        status,
         device_id: "esp32-lab-01",
         is_test: true,
-        created_at: new Date().toISOString(),
-        student: status === "matched" ? {
-            full_name: studentName,
-            reg_number: `992100400${templateId}`
-        } : null
+        created_at: new Date().toISOString()
     };
-
     inMemoryState.lastScanEvent = event;
     inMemoryState.inMemoryScans.unshift(event);
     if (inMemoryState.inMemoryScans.length > 50) inMemoryState.inMemoryScans.pop();
-
-    return res.status(201).json({
-        success: true,
-        isTest: true,
-        event
-    });
+    return res.status(201).json({ success: true, event, note: "HOD test scan — not a real fingerprint result" });
 });
+
+/* Enrollment routes removed — use physical sensor enrollment. See firmware/README.md */
+app.post("/api/enrollment/start", (_req, res) => {
+    return res.status(410).json({ error: "Enrollment API removed. Use physical sensor enrollment." });
+});
+app.get("/api/device/enrollment-task", (req, res) => {
+    if (!deviceAuthorized(req)) return res.status(401).json({ error: "Device not authorized" });
+    return res.json({ hasTask: false });
+});
+app.post("/api/device/enrollment-complete", (req, res) => {
+    if (!deviceAuthorized(req)) return res.status(401).json({ error: "Device not authorized" });
+    return res.json({ success: true, note: "Enrollment tracking removed" });
+});
+app.get("/api/enrollment/status/:sessionId", (_req, res) => {
+    return res.status(410).json({ error: "Enrollment status API removed." });
+});
+
+
 
 // ============================================================================
 // AUTHENTICATED PORTAL API ROUTES
@@ -1160,10 +1126,10 @@ app.delete("/api/equipment/:id", requireAuth, async (req, res) => {
 // ============================================================================
 
 /**
- * 21. POST /api/equipment/issue — issue equipment via RPC
+ * 21. POST /api/equipment/issue — issue equipment via RPC (with issue_condition)
  */
 app.post("/api/equipment/issue", requireAuth, async (req, res) => {
-    const { student_id, equipment_id, due_at, remarks, lab_id } = req.body || {};
+    const { student_id, equipment_id, due_at, remarks, lab_id, issue_condition } = req.body || {};
     if (!student_id || !equipment_id) {
         return res.status(400).json({ error: "student_id and equipment_id are required" });
     }
@@ -1174,7 +1140,8 @@ app.post("/api/equipment/issue", requireAuth, async (req, res) => {
             p_equipment_id: equipment_id,
             p_due_at: due_at || null,
             p_remarks: remarks || null,
-            p_lab_id: lab_id || null
+            p_lab_id: lab_id || null,
+            p_issue_condition: issue_condition || "good"
         });
         if (error) {
             const msg = error.message || "";
@@ -1186,6 +1153,69 @@ app.post("/api/equipment/issue", requireAuth, async (req, res) => {
         return res.status(201).json(data);
     } catch (err) {
         return res.status(500).json({ error: err.message || "Failed to issue equipment" });
+    }
+});
+
+/**
+ * 21b. GET /api/outstanding — active not-returned transactions (search, filter, paginate)
+ */
+app.get("/api/outstanding", requireAuth, async (req, res) => {
+    const { search, lab_id, page = 1, limit = 50 } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+
+    try {
+        let query = supabase
+            .from("equipment_transactions")
+            .select(`
+                id, issued_at, due_at, status, issue_condition, issue_remarks, lab_id,
+                student:students(id, reg_number, full_name, department, section, year),
+                equipment:equipment(id, asset_id, name, category),
+                laboratory:laboratories(id, name, lab_code),
+                issued_by_staff:profiles!issued_by(full_name, role)
+            `, { count: "exact" })
+            .in("status", ["active", "overdue"])
+            .order("issued_at", { ascending: true })
+            .range(offset, offset + Number(limit) - 1);
+
+        if (search) {
+            // We filter in JS because Supabase doesn't support OR across joined tables easily
+        }
+        if (lab_id) {
+            query = query.eq("lab_id", lab_id);
+        } else if (req.actor.role !== "HOD") {
+            const { data: assignments } = await supabase
+                .from("lab_assignments").select("lab_id")
+                .eq("user_id", req.actor.id).eq("is_active", true);
+            const labIds = (assignments || []).map(a => a.lab_id);
+            if (labIds.length > 0) query = query.in("lab_id", labIds);
+        }
+
+        const { data, count, error } = await query;
+        if (error) throw error;
+
+        let result = data || [];
+        // Apply search filter client-side across joined fields
+        if (search) {
+            const q = search.toLowerCase();
+            result = result.filter(t =>
+                t.student?.full_name?.toLowerCase().includes(q) ||
+                t.student?.reg_number?.toLowerCase().includes(q) ||
+                t.equipment?.name?.toLowerCase().includes(q) ||
+                t.equipment?.asset_id?.toLowerCase().includes(q)
+            );
+        }
+
+        // Add computed fields
+        const now = new Date();
+        result = result.map(t => ({
+            ...t,
+            is_overdue: t.status === 'active' && new Date(t.due_at) < now,
+            hours_outstanding: (now - new Date(t.issued_at)) / 3600000
+        }));
+
+        return res.json({ data: result, count: search ? result.length : (count || 0) });
+    } catch (err) {
+        return res.status(500).json({ error: "Failed to fetch outstanding equipment" });
     }
 });
 

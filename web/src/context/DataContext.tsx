@@ -57,11 +57,22 @@ interface DataContextType {
   refreshAll: () => Promise<void>;
   refreshStats: () => Promise<void>;
   issueEquipment: (
-    studentId: string, equipmentId: string, dueAt: string, remarks?: string, labId?: string
+    studentId: string,
+    equipmentId: string,
+    dueAt: string,
+    remarks?: string,
+    labId?: string,
+    issueCondition?: EquipmentCondition
   ) => Promise<{ success: boolean; transactionId?: string; error?: string }>;
   returnEquipment: (
     transactionId: string, condition: EquipmentCondition, remarks?: string
   ) => Promise<{ success: boolean; error?: string }>;
+  fetchOutstanding: (params?: {
+    search?: string;
+    labId?: string;
+    page?: number;
+    limit?: number;
+  }) => Promise<{ data: EquipmentTransaction[]; count: number }>;
   addStudent: (student: Omit<Student, 'id' | 'created_at'> & { lab_id?: string }) => Promise<{ success: boolean; error?: string }>;
   updateStudent: (id: string, student: Partial<Student>) => Promise<{ success: boolean; error?: string }>;
   addEquipment: (item: Omit<Equipment, 'id' | 'created_at'>) => Promise<{ success: boolean; error?: string }>;
@@ -71,8 +82,6 @@ interface DataContextType {
   addStaff: (staffData: Omit<StaffProfile, 'id' | 'created_at' | 'updated_at'> & { password?: string; lab_ids?: string[] }) => Promise<{ success: boolean; error?: string }>;
   toggleStaffStatus: (id: string) => Promise<{ success: boolean; error?: string }>;
   simulateHardwareScan: (templateId: number, isTest?: boolean) => Promise<{ success: boolean; error?: string }>;
-  startEnrollment: (studentId: string, templateId: number) => Promise<{ success: boolean; sessionId?: string; error?: string }>;
-  cancelEnrollment: () => void;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
@@ -313,15 +322,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   // ─── ISSUE EQUIPMENT ────────────────────────────────────────────────────────
   const issueEquipment = useCallback(async (
-    studentId: string, equipmentId: string, dueAt: string, remarks?: string, labId?: string
+    studentId: string,
+    equipmentId: string,
+    dueAt: string,
+    remarks?: string,
+    labId?: string,
+    issueCondition?: EquipmentCondition
   ) => {
     try {
       const token = sessionTokenRef.current;
       const result = await apiFetch('/api/equipment/issue', {
         method: 'POST',
         body: JSON.stringify({
-          student_id: studentId, equipment_id: equipmentId,
-          due_at: dueAt, remarks, lab_id: labId
+          student_id: studentId,
+          equipment_id: equipmentId,
+          due_at: dueAt,
+          remarks,
+          lab_id: labId,
+          issue_condition: issueCondition || 'good'
         })
       }, token);
       await fetchAll();
@@ -474,52 +492,44 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   }, [staff]);
 
-  // ─── HARDWARE SCAN SIMULATOR (DEV/TEST) ──────────────────────────────────────
+  // ─── FETCH OUTSTANDING EQUIPMENT ───────────────────────────────────────────
+  const fetchOutstanding = useCallback(async (params?: {
+    search?: string;
+    labId?: string;
+    page?: number;
+    limit?: number;
+  }) => {
+    try {
+      const token = sessionTokenRef.current;
+      const queryParams = new URLSearchParams();
+      if (params?.search) queryParams.set('search', params.search);
+      if (params?.labId) queryParams.set('lab_id', params.labId);
+      if (params?.page) queryParams.set('page', String(params.page));
+      if (params?.limit) queryParams.set('limit', String(params.limit));
+
+      const queryStr = queryParams.toString() ? `?${queryParams.toString()}` : '';
+      const result = await apiFetch(`/api/outstanding${queryStr}`, { method: 'GET' }, token);
+      return { data: result.data || [], count: result.count || 0 };
+    } catch (err: unknown) {
+      console.error('Failed to fetch outstanding equipment:', err);
+      return { data: [], count: 0 };
+    }
+  }, []);
+
+  // ─── HARDWARE SCAN SIMULATOR (HOD / DEV TEST) ────────────────────────────────
   const simulateHardwareScan = useCallback(async (templateId: number, isTest?: boolean) => {
     try {
-      await fetch(`${API_BASE_URL}/api/test/simulate-scan`, {
+      const token = sessionTokenRef.current;
+      await apiFetch('/api/test/simulate-scan', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ templateId, isTest: isTest ?? true })
-      });
+      }, token);
       await fetchAll();
       return { success: true };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : 'Simulation failed' };
     }
   }, [fetchAll]);
-
-  // ─── ENROLLMENT ──────────────────────────────────────────────────────────────
-  const startEnrollment = useCallback(async (studentId: string, templateId: number) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/enrollment/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentId, targetTemplateId: templateId })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to start enrollment');
-
-      const student = students.find(s => s.id === studentId);
-      const session: EnrollmentSession = {
-        sessionId: data.sessionId,
-        studentId,
-        studentName: student?.full_name,
-        studentReg: student?.reg_number,
-        targetTemplateId: templateId,
-        status: 'waiting_device',
-        createdAt: new Date().toISOString()
-      };
-      setEnrollmentSession(session);
-      return { success: true, sessionId: data.sessionId };
-    } catch (err: unknown) {
-      return { success: false, error: err instanceof Error ? err.message : 'Failed to start enrollment' };
-    }
-  }, [students]);
-
-  const cancelEnrollment = useCallback(() => {
-    setEnrollmentSession(null);
-  }, []);
 
   return (
     <DataContext.Provider
@@ -528,12 +538,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         deviceTelemetry, stats, isLoading, isRefreshing, realtimeConnected,
         enrollmentSession,
         refreshAll, refreshStats,
-        issueEquipment, returnEquipment,
+        issueEquipment, returnEquipment, fetchOutstanding,
         addStudent, updateStudent, toggleStudentStatus,
         addEquipment, updateEquipment, deleteEquipment,
         addStaff, toggleStaffStatus,
-        simulateHardwareScan,
-        startEnrollment, cancelEnrollment
+        simulateHardwareScan
       }}
     >
       {children}

@@ -76,6 +76,7 @@ export function StatusBadge({ status }: { status: string }) {
         </Badge>
       );
     case 'damaged':
+    case 'missing':
     case 'inactive':
     case 'not_found':
     case 'error':
