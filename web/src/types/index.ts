@@ -50,7 +50,7 @@ export interface Student {
   active: boolean;
   photo_url?: string;
   fingerprint_enrolled?: boolean;
-  template_id?: number;
+  template_id?: number | null;
   created_by?: string;
   created_at: string;
   updated_at?: string;

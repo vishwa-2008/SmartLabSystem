@@ -73,8 +73,8 @@ interface DataContextType {
     page?: number;
     limit?: number;
   }) => Promise<{ data: EquipmentTransaction[]; count: number }>;
-  addStudent: (student: Omit<Student, 'id' | 'created_at'> & { lab_id?: string }) => Promise<{ success: boolean; error?: string }>;
-  updateStudent: (id: string, student: Partial<Student>) => Promise<{ success: boolean; error?: string }>;
+  addStudent: (student: Omit<Student, 'id' | 'created_at'> & { lab_id?: string; template_id?: number | null }) => Promise<{ success: boolean; error?: string }>;
+  updateStudent: (id: string, student: Partial<Student> & { template_id?: number | null }) => Promise<{ success: boolean; error?: string }>;
   addEquipment: (item: Omit<Equipment, 'id' | 'created_at'>) => Promise<{ success: boolean; error?: string }>;
   updateEquipment: (id: string, item: Partial<Equipment>) => Promise<{ success: boolean; error?: string }>;
   deleteEquipment: (id: string) => Promise<{ success: boolean; error?: string }>;
@@ -159,7 +159,23 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         .select('*, fingerprint_templates(template_id, active, enrolled_at)')
         .order('created_at', { ascending: false })
         .limit(200);
-      if (studentData) setStudents(studentData as Student[]);
+      if (studentData) {
+        const formatted = (studentData as any[]).map(s => {
+          let activeTpl: { template_id: number; active?: boolean } | null = null;
+          if (Array.isArray(s.fingerprint_templates)) {
+            activeTpl = s.fingerprint_templates.find((t: any) => t && t.active !== false) || null;
+          } else if (s.fingerprint_templates && typeof s.fingerprint_templates === 'object') {
+            activeTpl = s.fingerprint_templates.active !== false ? s.fingerprint_templates : null;
+          }
+
+          return {
+            ...s,
+            fingerprint_enrolled: Boolean(activeTpl),
+            template_id: activeTpl ? activeTpl.template_id : null
+          };
+        });
+        setStudents(formatted as Student[]);
+      }
 
       // Fetch equipment (RLS-scoped)
       const { data: equipData } = await supabase
@@ -368,36 +384,36 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   // ─── ADD STUDENT ────────────────────────────────────────────────────────────
   const addStudent = useCallback(async (
-    studentData: Omit<Student, 'id' | 'created_at'> & { lab_id?: string }
+    studentData: Omit<Student, 'id' | 'created_at'> & { lab_id?: string; template_id?: number | null }
   ) => {
     try {
       const token = sessionTokenRef.current;
-      const result = await apiFetch('/api/students', {
+      await apiFetch('/api/students', {
         method: 'POST',
         body: JSON.stringify(studentData)
       }, token);
-      setStudents(prev => [result as Student, ...prev]);
+      await fetchAll();
       await fetchStats();
       return { success: true };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to add student' };
     }
-  }, [fetchStats]);
+  }, [fetchAll, fetchStats]);
 
   // ─── UPDATE STUDENT ─────────────────────────────────────────────────────────
-  const updateStudent = useCallback(async (id: string, updates: Partial<Student>) => {
+  const updateStudent = useCallback(async (id: string, updates: Partial<Student> & { template_id?: number | null }) => {
     try {
       const token = sessionTokenRef.current;
-      const result = await apiFetch(`/api/students/${id}`, {
+      await apiFetch(`/api/students/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(updates)
       }, token);
-      setStudents(prev => prev.map(s => s.id === id ? { ...s, ...result } : s));
+      await fetchAll();
       return { success: true };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to update student' };
     }
-  }, []);
+  }, [fetchAll]);
 
   // ─── ADD EQUIPMENT ──────────────────────────────────────────────────────────
   const addEquipment = useCallback(async (item: Omit<Equipment, 'id' | 'created_at'>) => {

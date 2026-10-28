@@ -878,15 +878,37 @@ app.get("/api/students", requireAuth, async (req, res) => {
 });
 
 /**
- * 16. POST /api/students — register a student
+ * 16. POST /api/students — register a student with optional fingerprint slot
  */
 app.post("/api/students", requireAuth, async (req, res) => {
-    const { reg_number, full_name, department, section, year, phone, lab_id } = req.body || {};
+    const { reg_number, full_name, department, section, year, phone, lab_id, template_id, device_id } = req.body || {};
     if (!reg_number || !full_name || !department || !section || !year) {
         return res.status(400).json({ error: "reg_number, full_name, department, section, and year are required" });
     }
     if (!Number.isInteger(Number(year)) || Number(year) < 1 || Number(year) > 5) {
         return res.status(400).json({ error: "year must be between 1 and 5" });
+    }
+
+    // Check template_id uniqueness if provided
+    let parsedTemplateId = null;
+    if (template_id !== undefined && template_id !== null && template_id !== "") {
+        parsedTemplateId = Number(template_id);
+        if (!Number.isInteger(parsedTemplateId) || parsedTemplateId < 1) {
+            return res.status(400).json({ error: "template_id must be a positive integer" });
+        }
+
+        const { data: existingTemplate } = await supabase
+            .from("fingerprint_templates")
+            .select("student_id, student:students(full_name, reg_number)")
+            .eq("template_id", parsedTemplateId)
+            .eq("active", true)
+            .maybeSingle();
+
+        if (existingTemplate) {
+            return res.status(409).json({
+                error: `Fingerprint Slot #${parsedTemplateId} is already assigned to ${existingTemplate.student?.full_name || 'another student'} (${existingTemplate.student?.reg_number || 'ID'}).`
+            });
+        }
     }
 
     // Lab In-charge must provide a lab_id they are assigned to
@@ -914,6 +936,23 @@ app.post("/api/students", requireAuth, async (req, res) => {
             throw error;
         }
 
+        // Register fingerprint template if template_id was provided
+        if (parsedTemplateId) {
+            const { error: fpError } = await supabase
+                .from("fingerprint_templates")
+                .insert({
+                    student_id: student.id,
+                    template_id: parsedTemplateId,
+                    active: true,
+                    enrolled_by: req.actor.id,
+                    device_id: device_id || "esp32-lab-01"
+                });
+
+            if (fpError) {
+                console.error("Failed to link fingerprint template:", fpError);
+            }
+        }
+
         // Create lab access if lab_id provided
         if (lab_id) {
             await supabase.from("student_lab_access").insert({
@@ -925,17 +964,26 @@ app.post("/api/students", requireAuth, async (req, res) => {
         await supabase.from("audit_logs").insert({
             actor_id: req.actor.id, action: "REGISTER_STUDENT",
             entity_type: "students", entity_id: student.id,
-            details: { reg_number: student.reg_number, full_name: student.full_name, lab_id }
+            details: {
+                reg_number: student.reg_number,
+                full_name: student.full_name,
+                lab_id,
+                template_id: parsedTemplateId
+            }
         });
 
-        return res.status(201).json(student);
+        return res.status(201).json({
+            ...student,
+            template_id: parsedTemplateId,
+            fingerprint_enrolled: Boolean(parsedTemplateId)
+        });
     } catch (err) {
-        return res.status(500).json({ error: "Failed to register student" });
+        return res.status(500).json({ error: "Failed to register student: " + (err.message || "") });
     }
 });
 
 /**
- * 17. PATCH /api/students/:id — update student record
+ * 17. PATCH /api/students/:id — update student record & fingerprint slot
  */
 app.patch("/api/students/:id", requireAuth, async (req, res) => {
     const allowed = ["full_name", "department", "section", "year", "phone", "active"];
@@ -944,29 +992,100 @@ app.patch("/api/students/:id", requireAuth, async (req, res) => {
         if (req.body?.[key] !== undefined) updates[key] = req.body[key];
     }
 
-    if (Object.keys(updates).length === 0) {
+    const { template_id, device_id } = req.body || {};
+    const hasTemplateUpdate = template_id !== undefined;
+
+    if (Object.keys(updates).length === 0 && !hasTemplateUpdate) {
         return res.status(400).json({ error: "No valid fields to update" });
     }
 
     try {
-        const { data, error } = await supabase
-            .from("students")
-            .update(updates)
-            .eq("id", req.params.id)
-            .select()
-            .single();
-        if (error) throw error;
-        if (!data) return res.status(404).json({ error: "Student not found" });
+        let student = null;
+        if (Object.keys(updates).length > 0) {
+            const { data, error } = await supabase
+                .from("students")
+                .update(updates)
+                .eq("id", req.params.id)
+                .select()
+                .single();
+            if (error) throw error;
+            if (!data) return res.status(404).json({ error: "Student not found" });
+            student = data;
+        } else {
+            const { data, error } = await supabase
+                .from("students")
+                .select("*")
+                .eq("id", req.params.id)
+                .single();
+            if (error || !data) return res.status(404).json({ error: "Student not found" });
+            student = data;
+        }
+
+        // Handle fingerprint template update
+        let activeTid = null;
+        if (hasTemplateUpdate) {
+            if (template_id === null || template_id === 0 || template_id === "") {
+                // Remove fingerprint template
+                await supabase
+                    .from("fingerprint_templates")
+                    .delete()
+                    .eq("student_id", req.params.id);
+            } else {
+                const parsedTid = Number(template_id);
+                if (!Number.isInteger(parsedTid) || parsedTid < 1) {
+                    return res.status(400).json({ error: "template_id must be a positive integer" });
+                }
+
+                // Check if already assigned to someone else
+                const { data: conflict } = await supabase
+                    .from("fingerprint_templates")
+                    .select("student_id, student:students(full_name, reg_number)")
+                    .eq("template_id", parsedTid)
+                    .neq("student_id", req.params.id)
+                    .eq("active", true)
+                    .maybeSingle();
+
+                if (conflict) {
+                    return res.status(409).json({
+                        error: `Fingerprint Slot #${parsedTid} is already in use by ${conflict.student?.full_name || 'another student'}.`
+                    });
+                }
+
+                // Remove any previous template for this student first to avoid unique constraint conflict
+                await supabase
+                    .from("fingerprint_templates")
+                    .delete()
+                    .eq("student_id", req.params.id);
+
+                // Insert the new template assignment
+                const { error: insErr } = await supabase
+                    .from("fingerprint_templates")
+                    .insert({
+                        student_id: req.params.id,
+                        template_id: parsedTid,
+                        active: true,
+                        enrolled_by: req.actor.id,
+                        device_id: device_id || "esp32-lab-01"
+                    });
+
+                if (insErr) throw insErr;
+                activeTid = parsedTid;
+            }
+        }
 
         await supabase.from("audit_logs").insert({
             actor_id: req.actor.id, action: "UPDATE_STUDENT",
             entity_type: "students", entity_id: req.params.id,
-            details: updates
+            details: { ...updates, template_id }
         });
 
-        return res.json(data);
+        return res.json({
+            ...student,
+            template_id: activeTid !== null ? activeTid : undefined,
+            fingerprint_enrolled: activeTid !== null
+        });
     } catch (err) {
-        return res.status(500).json({ error: "Failed to update student" });
+        return res.status(500).json({ error: "Failed to update student: " + (err.message || "") });
     }
 });
 

@@ -46,20 +46,36 @@ export default function StudentsPage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState<boolean>(false);
+  const [fingerprintModalStudent, setFingerprintModalStudent] = useState<Student | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
 
   // Form State
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<{
+    reg_number: string;
+    full_name: string;
+    department: string;
+    section: string;
+    year: number;
+    phone: string;
+    active: boolean;
+    template_id?: number | null;
+  }>({
     reg_number: '',
     full_name: '',
     department: 'Computer Science and Engineering',
     section: 'A',
     year: 3,
     phone: '',
-    active: true
+    active: true,
+    template_id: null
   });
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  // Quick Fingerprint Slot State
+  const [quickSlot, setQuickSlot] = useState<string>('');
+  const [fingerprintError, setFingerprintError] = useState<string | null>(null);
+  const [isUpdatingFingerprint, setIsUpdatingFingerprint] = useState<boolean>(false);
 
   // Filter students
   const filteredStudents = students.filter(student => {
@@ -89,7 +105,8 @@ export default function StudentsPage() {
       section: student.section,
       year: student.year,
       phone: student.phone || '',
-      active: student.active
+      active: student.active,
+      template_id: student.template_id ?? null
     });
     setFormError(null);
     setIsEditModalOpen(true);
@@ -110,7 +127,8 @@ export default function StudentsPage() {
     const res = await addStudent({
       ...formData,
       year: Number(formData.year),
-      fingerprint_enrolled: false
+      fingerprint_enrolled: Boolean(formData.template_id),
+      template_id: formData.template_id ? Number(formData.template_id) : undefined
     });
 
     setIsSubmitting(false);
@@ -125,7 +143,8 @@ export default function StudentsPage() {
         section: 'A',
         year: 3,
         phone: '',
-        active: true
+        active: true,
+        template_id: null
       });
     }
   };
@@ -139,7 +158,8 @@ export default function StudentsPage() {
 
     const res = await updateStudent(selectedStudent.id, {
       ...formData,
-      year: Number(formData.year)
+      year: Number(formData.year),
+      template_id: formData.template_id ? Number(formData.template_id) : null
     });
 
     setIsSubmitting(false);
@@ -147,6 +167,32 @@ export default function StudentsPage() {
       setFormError(res.error || 'Failed to update student');
     } else {
       setIsEditModalOpen(false);
+    }
+  };
+
+  // Handle Quick Fingerprint Assignment
+  const handleQuickFingerprintSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fingerprintModalStudent) return;
+    setFingerprintError(null);
+    setIsUpdatingFingerprint(true);
+
+    const slotNum = quickSlot.trim() === '' ? null : Number(quickSlot);
+    if (slotNum !== null && (isNaN(slotNum) || slotNum < 1 || slotNum > 1000000)) {
+      setFingerprintError('Please enter a valid slot number between 1 and 1000000 (or leave empty to clear slot).');
+      setIsUpdatingFingerprint(false);
+      return;
+    }
+
+    const res = await updateStudent(fingerprintModalStudent.id, {
+      template_id: slotNum
+    });
+
+    setIsUpdatingFingerprint(false);
+    if (!res.success) {
+      setFingerprintError(res.error || 'Failed to update fingerprint registration');
+    } else {
+      setFingerprintModalStudent(null);
     }
   };
 
@@ -173,7 +219,8 @@ export default function StudentsPage() {
               section: 'A',
               year: 3,
               phone: '',
-              active: true
+              active: true,
+              template_id: null
             });
             setFormError(null);
             setIsAddModalOpen(true);
@@ -281,22 +328,47 @@ export default function StudentsPage() {
                       Sec {student.section} • Year {student.year}
                     </td>
                     <td className="px-5 py-3">
-                      {student.fingerprint_enrolled ? (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
-                          <Fingerprint className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>Slot #{student.template_id}</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
-                          <XCircle className="w-3.5 h-3.5 text-amber-600" />
-                          <span>Not Enrolled</span>
-                        </span>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFingerprintModalStudent(student);
+                          setQuickSlot(student.template_id ? String(student.template_id) : '');
+                          setFingerprintError(null);
+                        }}
+                        className="group text-left inline-block"
+                        title="Click to assign or edit sensor slot"
+                      >
+                        {student.fingerprint_enrolled ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 group-hover:bg-emerald-100 transition-colors">
+                            <Fingerprint className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Slot #{student.template_id}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200 group-hover:bg-amber-100 transition-colors">
+                            <Fingerprint className="w-3.5 h-3.5 text-amber-500" />
+                            <span>Assign Slot</span>
+                          </span>
+                        )}
+                      </button>
                     </td>
                     <td className="px-5 py-3">
                       <StatusBadge status={student.active ? 'active' : 'inactive'} />
                     </td>
                     <td className="px-5 py-3 text-right space-x-1 whitespace-nowrap">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setFingerprintModalStudent(student);
+                          setQuickSlot(student.template_id ? String(student.template_id) : '');
+                          setFingerprintError(null);
+                        }}
+                        className="h-7 w-7 p-0 text-[#1B4998] hover:text-[#1B4998] hover:bg-blue-50"
+                        title={student.fingerprint_enrolled ? `Edit Fingerprint Slot (Slot #${student.template_id})` : 'Assign Fingerprint Slot'}
+                      >
+                        <Fingerprint className="w-3.5 h-3.5" />
+                      </Button>
+
                       <Button
                         size="sm"
                         variant="ghost"
@@ -409,6 +481,32 @@ export default function StudentsPage() {
             onChange={e => setFormData({ ...formData, phone: e.target.value })}
           />
 
+          {/* Fingerprint Sensor Slot Assignment */}
+          <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-lg space-y-2">
+            <div className="flex items-center gap-2">
+              <Fingerprint className="w-4 h-4 text-[#1B4998]" />
+              <label className="text-xs font-semibold text-slate-800">
+                Fingerprint Sensor Slot ID (Optional)
+              </label>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Enter the slot number (1–1000) enrolled on the optical sensor. Can also be assigned later.
+            </p>
+            <Input
+              type="number"
+              min={1}
+              max={1000000}
+              placeholder="e.g. 1 (Leave blank if not enrolled yet)"
+              value={formData.template_id ?? ''}
+              onChange={e =>
+                setFormData({
+                  ...formData,
+                  template_id: e.target.value === '' ? null : Number(e.target.value)
+                })
+              }
+            />
+          </div>
+
           <div className="pt-2 flex justify-end gap-2">
             <Button
               type="button"
@@ -429,7 +527,7 @@ export default function StudentsPage() {
         isOpen={isEditModalOpen}
         onClose={() => setIsEditModalOpen(false)}
         title="Edit Student Profile"
-        description="Update student demographic and academic details"
+        description="Update student demographic, academic, and biometric details"
       >
         <form onSubmit={handleEditSubmit} className="space-y-4">
           {formError && (
@@ -490,6 +588,32 @@ export default function StudentsPage() {
             onChange={e => setFormData({ ...formData, phone: e.target.value })}
           />
 
+          {/* Fingerprint Sensor Slot Assignment */}
+          <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-lg space-y-2">
+            <div className="flex items-center gap-2">
+              <Fingerprint className="w-4 h-4 text-[#1B4998]" />
+              <label className="text-xs font-semibold text-slate-800">
+                Fingerprint Sensor Slot ID
+              </label>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Slot number (1–1000) stored in the optical sensor. Clear or set to 0 to remove biometric registration.
+            </p>
+            <Input
+              type="number"
+              min={1}
+              max={1000000}
+              placeholder="e.g. 1 (Leave empty to remove enrollment)"
+              value={formData.template_id ?? ''}
+              onChange={e =>
+                setFormData({
+                  ...formData,
+                  template_id: e.target.value === '' ? null : Number(e.target.value)
+                })
+              }
+            />
+          </div>
+
           <div className="pt-2 flex justify-end gap-2">
             <Button
               type="button"
@@ -504,6 +628,58 @@ export default function StudentsPage() {
           </div>
         </form>
       </Modal>
+
+      {/* Quick Fingerprint Slot Assignment Modal */}
+      {fingerprintModalStudent && (
+        <Modal
+          isOpen={Boolean(fingerprintModalStudent)}
+          onClose={() => setFingerprintModalStudent(null)}
+          title={`Biometric Slot: ${fingerprintModalStudent.full_name}`}
+          description={`Reg No: ${fingerprintModalStudent.reg_number} • Optical Sensor Slot Mapping`}
+        >
+          <form onSubmit={handleQuickFingerprintSubmit} className="space-y-4">
+            {fingerprintError && (
+              <Alert variant="danger" title="Registration Error">
+                {fingerprintError}
+              </Alert>
+            )}
+
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-1">
+              <div className="font-semibold text-slate-800">How optical fingerprint registration works:</div>
+              <p className="text-slate-600">
+                1. Physically enroll the student&apos;s finger onto the optical sensor module using the Arduino enroll routine to assign a slot ID (e.g., Slot #1).
+              </p>
+              <p className="text-slate-600">
+                2. Enter the corresponding slot ID below. When the student places their finger on the sensor, the system instantly identifies them and loads their profile.
+              </p>
+            </div>
+
+            <Input
+              label="Optical Sensor Template Slot (1 - 1000)"
+              type="number"
+              min={1}
+              max={1000000}
+              placeholder="e.g. 1 (leave blank to unassign)"
+              value={quickSlot}
+              onChange={e => setQuickSlot(e.target.value)}
+              autoFocus
+            />
+
+            <div className="pt-2 flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setFingerprintModalStudent(null)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" isLoading={isUpdatingFingerprint}>
+                Save Biometric Slot
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
 
       {/* Student Detail Modal */}
       {selectedStudent && (
@@ -556,13 +732,20 @@ export default function StudentsPage() {
                 </div>
               </div>
 
-              {!selectedStudent.fingerprint_enrolled && (
-                <Link href="/scans">
-                  <Button size="sm" variant="outline" className="text-xs">
-                    Enroll Now
-                  </Button>
-                </Link>
-              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-xs"
+                onClick={() => {
+                  const s = selectedStudent;
+                  setIsDetailModalOpen(false);
+                  setFingerprintModalStudent(s);
+                  setQuickSlot(s.template_id ? String(s.template_id) : '');
+                  setFingerprintError(null);
+                }}
+              >
+                {selectedStudent.fingerprint_enrolled ? 'Change Slot' : 'Assign Slot'}
+              </Button>
             </div>
 
             {/* Loan History for this student */}
