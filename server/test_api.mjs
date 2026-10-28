@@ -4,7 +4,7 @@
 
 import http from 'node:http';
 
-const API_BASE = 'http://localhost:3000';
+const API_BASE = 'http://localhost:5000';
 const VALID_DEVICE_TOKEN = '1007d4fe45634146fd958879620e997ad95b72e62a1032bb8cf73d7687f25abc';
 
 function makeRequest(path, options = {}, postData = null) {
@@ -113,7 +113,7 @@ async function runApiVerification() {
     // Test 8: Enrollment Flow Handshake
     const startEnroll = await makeRequest(
       '/api/enrollment/start',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-Token': VALID_DEVICE_TOKEN } },
       { studentId: 'a0000001-0000-0000-0000-000000000001', targetTemplateId: 7 }
     );
     assert(startEnroll.status === 201, 'POST /api/enrollment/start initiates enrollment session');

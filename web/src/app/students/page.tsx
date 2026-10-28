@@ -23,7 +23,10 @@ import {
   Eye,
   CheckCircle2,
   XCircle,
-  PackageCheck
+  PackageCheck,
+  Loader2,
+  Radio,
+  Sparkles
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -34,7 +37,11 @@ export default function StudentsPage() {
     scans,
     addStudent,
     updateStudent,
-    toggleStudentStatus
+    toggleStudentStatus,
+    startEnrollment,
+    cancelEnrollment,
+    enrollmentSession,
+    deviceTelemetry
   } = useData();
 
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -76,6 +83,8 @@ export default function StudentsPage() {
   const [quickSlot, setQuickSlot] = useState<string>('');
   const [fingerprintError, setFingerprintError] = useState<string | null>(null);
   const [isUpdatingFingerprint, setIsUpdatingFingerprint] = useState<boolean>(false);
+  const [enrollmentMode, setEnrollmentMode] = useState<'device' | 'manual'>('device');
+  const [isInitiatingEnrollment, setIsInitiatingEnrollment] = useState<boolean>(false);
 
   // Filter students
   const filteredStudents = students.filter(student => {
@@ -193,6 +202,26 @@ export default function StudentsPage() {
       setFingerprintError(res.error || 'Failed to update fingerprint registration');
     } else {
       setFingerprintModalStudent(null);
+    }
+  };
+
+  // Handle Live Biometric Enrollment via ESP32 Hardware
+  const handleStartLiveEnrollment = async () => {
+    if (!fingerprintModalStudent) return;
+    setFingerprintError(null);
+
+    const slotNum = Number(quickSlot);
+    if (!quickSlot || isNaN(slotNum) || slotNum < 1 || slotNum > 1000) {
+      setFingerprintError('Please specify a valid hardware slot number (1 - 1000) for biometric sensor storage.');
+      return;
+    }
+
+    setIsInitiatingEnrollment(true);
+    const res = await startEnrollment(fingerprintModalStudent.id, slotNum);
+    setIsInitiatingEnrollment(false);
+
+    if (!res.success) {
+      setFingerprintError(res.error || 'Failed to trigger hardware enrollment');
     }
   };
 
@@ -629,55 +658,226 @@ export default function StudentsPage() {
         </form>
       </Modal>
 
-      {/* Quick Fingerprint Slot Assignment Modal */}
+      {/* Fingerprint Biometric Enrollment Modal */}
       {fingerprintModalStudent && (
         <Modal
           isOpen={Boolean(fingerprintModalStudent)}
-          onClose={() => setFingerprintModalStudent(null)}
-          title={`Biometric Slot: ${fingerprintModalStudent.full_name}`}
-          description={`Reg No: ${fingerprintModalStudent.reg_number} • Optical Sensor Slot Mapping`}
+          onClose={() => {
+            if (enrollmentSession && ['waiting_device', 'ready_for_finger'].includes(enrollmentSession.status)) {
+              cancelEnrollment();
+            }
+            setFingerprintModalStudent(null);
+          }}
+          title={`Biometric Enrollment: ${fingerprintModalStudent.full_name}`}
+          description={`Reg No: ${fingerprintModalStudent.reg_number} • Optical Fingerprint Registration`}
         >
-          <form onSubmit={handleQuickFingerprintSubmit} className="space-y-4">
+          <div className="space-y-4">
             {fingerprintError && (
               <Alert variant="danger" title="Registration Error">
                 {fingerprintError}
               </Alert>
             )}
 
-            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-1">
-              <div className="font-semibold text-slate-800">How optical fingerprint registration works:</div>
-              <p className="text-slate-600">
-                1. Physically enroll the student&apos;s finger onto the optical sensor module using the Arduino enroll routine to assign a slot ID (e.g., Slot #1).
-              </p>
-              <p className="text-slate-600">
-                2. Enter the corresponding slot ID below. When the student places their finger on the sensor, the system instantly identifies them and loads their profile.
-              </p>
-            </div>
-
-            <Input
-              label="Optical Sensor Template Slot (1 - 1000)"
-              type="number"
-              min={1}
-              max={1000000}
-              placeholder="e.g. 1 (leave blank to unassign)"
-              value={quickSlot}
-              onChange={e => setQuickSlot(e.target.value)}
-              autoFocus
-            />
-
-            <div className="pt-2 flex justify-end gap-2">
-              <Button
+            {/* Mode Selector Tabs */}
+            <div className="flex border-b border-slate-200">
+              <button
                 type="button"
-                variant="secondary"
-                onClick={() => setFingerprintModalStudent(null)}
+                onClick={() => setEnrollmentMode('device')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold border-b-2 transition-colors ${
+                  enrollmentMode === 'device'
+                    ? 'border-[#1B4998] text-[#1B4998]'
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
               >
-                Cancel
-              </Button>
-              <Button type="submit" isLoading={isUpdatingFingerprint}>
-                Save Biometric Slot
-              </Button>
+                <Radio className="w-3.5 h-3.5" />
+                Live Hardware Enrollment (ESP32)
+              </button>
+              <button
+                type="button"
+                onClick={() => setEnrollmentMode('manual')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold border-b-2 transition-colors ${
+                  enrollmentMode === 'manual'
+                    ? 'border-[#1B4998] text-[#1B4998]'
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                <Fingerprint className="w-3.5 h-3.5" />
+                Manual Slot Mapping
+              </button>
             </div>
-          </form>
+
+            {/* Live Hardware Enrollment Tab */}
+            {enrollmentMode === 'device' && (
+              <div className="space-y-3">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-slate-800">ESP32 Hardware Status:</span>
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                        deviceTelemetry.online
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-amber-100 text-amber-800'
+                      }`}
+                    >
+                      ● {deviceTelemetry.online ? 'Online & Ready' : 'Standby / Polling (Every 5s)'}
+                    </span>
+                  </div>
+                  <p className="text-slate-600 text-[11px]">
+                    Initiates live optical sensor capture on the ESP32. The student places their finger twice when prompted.
+                  </p>
+                </div>
+
+                {/* If active enrollment session exists */}
+                {enrollmentSession && enrollmentSession.studentId === fingerprintModalStudent.id ? (
+                  <div className="p-4 border rounded-xl bg-blue-50/50 border-blue-200 text-center space-y-3">
+                    {enrollmentSession.status === 'waiting_device' && (
+                      <div className="space-y-2">
+                        <div className="flex justify-center">
+                          <Loader2 className="w-8 h-8 text-[#1B4998] animate-spin" />
+                        </div>
+                        <h4 className="font-semibold text-slate-900 text-sm">
+                          Waiting for ESP32 Sensor...
+                        </h4>
+                        <p className="text-xs text-slate-600 max-w-sm mx-auto">
+                          Task dispatched for Slot #{enrollmentSession.targetTemplateId}. The ESP32 reader will pick up this job and illuminate.
+                        </p>
+                      </div>
+                    )}
+
+                    {enrollmentSession.status === 'ready_for_finger' && (
+                      <div className="space-y-2">
+                        <div className="flex justify-center">
+                          <Sparkles className="w-8 h-8 text-amber-500 animate-pulse" />
+                        </div>
+                        <h4 className="font-semibold text-slate-900 text-sm">
+                          Place Finger on Sensor Now
+                        </h4>
+                        <p className="text-xs text-slate-600 max-w-sm mx-auto">
+                          Place finger firmly on the optical prism. Remove and place again when prompted.
+                        </p>
+                      </div>
+                    )}
+
+                    {enrollmentSession.status === 'enrolled' && (
+                      <div className="space-y-2">
+                        <div className="flex justify-center">
+                          <CheckCircle2 className="w-8 h-8 text-emerald-600" />
+                        </div>
+                        <h4 className="font-semibold text-emerald-800 text-sm">
+                          Biometric Enrollment Complete!
+                        </h4>
+                        <p className="text-xs text-slate-600">
+                          Fingerprint registered and securely linked to Slot #{enrollmentSession.targetTemplateId}.
+                        </p>
+                      </div>
+                    )}
+
+                    {enrollmentSession.status === 'failed' && (
+                      <div className="space-y-2">
+                        <div className="flex justify-center">
+                          <XCircle className="w-8 h-8 text-rose-600" />
+                        </div>
+                        <h4 className="font-semibold text-rose-800 text-sm">
+                          Enrollment Failed
+                        </h4>
+                        <p className="text-xs text-slate-600">
+                          {enrollmentSession.errorMessage || 'Sensor capture timed out or prints did not match. Please try again.'}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="pt-2 flex justify-center gap-2">
+                      {['waiting_device', 'ready_for_finger'].includes(enrollmentSession.status) ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => cancelEnrollment()}
+                        >
+                          Cancel Enrollment
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          onClick={() => {
+                            cancelEnrollment();
+                            setFingerprintModalStudent(null);
+                          }}
+                        >
+                          Done
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <Input
+                      label="Target Optical Sensor Slot (1 - 1000)"
+                      type="number"
+                      min={1}
+                      max={1000}
+                      placeholder="e.g. 1"
+                      value={quickSlot}
+                      onChange={e => setQuickSlot(e.target.value)}
+                    />
+
+                    <div className="pt-2 flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => setFingerprintModalStudent(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        onClick={handleStartLiveEnrollment}
+                        isLoading={isInitiatingEnrollment}
+                        leftIcon={<Radio className="w-3.5 h-3.5" />}
+                      >
+                        Trigger Live Sensor Enrollment
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Manual Slot Mapping Tab */}
+            {enrollmentMode === 'manual' && (
+              <form onSubmit={handleQuickFingerprintSubmit} className="space-y-4">
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-1">
+                  <div className="font-semibold text-slate-800">Direct Database Mapping:</div>
+                  <p className="text-slate-600">
+                    If this student was already enrolled directly on the optical module via Serial Monitor, enter their Slot ID below to link their profile.
+                  </p>
+                </div>
+
+                <Input
+                  label="Optical Sensor Template Slot (1 - 1000)"
+                  type="number"
+                  min={1}
+                  max={1000}
+                  placeholder="e.g. 1 (leave blank to unassign)"
+                  value={quickSlot}
+                  onChange={e => setQuickSlot(e.target.value)}
+                  autoFocus
+                />
+
+                <div className="pt-2 flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setFingerprintModalStudent(null)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" isLoading={isUpdatingFingerprint}>
+                    Save Biometric Slot
+                  </Button>
+                </div>
+              </form>
+            )}
+          </div>
         </Modal>
       )}
 

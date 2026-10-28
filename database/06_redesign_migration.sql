@@ -189,6 +189,26 @@ GRANT EXECUTE ON FUNCTION public.rpc_issue_equipment(UUID,UUID,TIMESTAMPTZ,TEXT,
 GRANT EXECUTE ON FUNCTION public.rpc_get_outstanding(TEXT,UUID,INT,INT) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.rpc_get_dashboard_stats() TO authenticated;
 
+-- 7. ENABLE REALTIME ON CORE TABLES
+DO $$
+BEGIN
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.equipment;
+    EXCEPTION WHEN duplicate_object THEN NULL; END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.equipment_transactions;
+    EXCEPTION WHEN duplicate_object THEN NULL; END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.students;
+    EXCEPTION WHEN duplicate_object THEN NULL; END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.scan_events;
+    EXCEPTION WHEN duplicate_object THEN NULL; END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.laboratories;
+    EXCEPTION WHEN duplicate_object THEN NULL; END;
+END $$;
+
 -- Optional cleanup (run manually after confirming empty):
 -- SELECT COUNT(*) FROM public.enrollment_sessions;
 -- DROP TABLE IF EXISTS public.enrollment_sessions CASCADE;

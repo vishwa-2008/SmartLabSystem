@@ -13,6 +13,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useData } from '@/context/DataContext';
 import { formatDate } from '@/lib/utils';
 import { StaffProfile, StaffRole } from '@/types';
+import { apiClient } from '@/lib/apiClient';
 import {
   UserCheck,
   ShieldCheck,
@@ -131,20 +132,10 @@ export default function StaffManagementPage() {
     if (!editStaff) return;
     setIsSavingAssignments(true);
     try {
-      const token = (await import('@/lib/supabaseClient')).supabase;
-      const { data: { session } } = await token.auth.getSession();
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3000'}/api/lab-incharges/${editStaff.id}`, {
+      await apiClient(`/api/lab-incharges/${editStaff.id}`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token || ''}`
-        },
         body: JSON.stringify({ lab_ids: editLabIds })
       });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error || 'Failed to update lab assignments');
-      }
       setEditStaff(null);
       await refreshAll();
     } catch (err: unknown) {

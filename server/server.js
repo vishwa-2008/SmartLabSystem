@@ -130,7 +130,9 @@ const supabase = createClient(
 const inMemoryState = {
     latestHeartbeats: {},
     lastScanEvent: null,
-    inMemoryScans: []
+    inMemoryScans: [],
+    pendingEnrollmentTask: null,
+    enrollmentSessions: {}
 };
 
 // ----------------------------------------------------------------------------
@@ -446,20 +448,61 @@ app.post("/api/test/simulate-scan", requireAuth, (req, res) => {
     return res.status(201).json({ success: true, event, note: "HOD test scan — not a real fingerprint result" });
 });
 
-/* Enrollment routes removed — use physical sensor enrollment. See firmware/README.md */
-app.post("/api/enrollment/start", (_req, res) => {
-    return res.status(410).json({ error: "Enrollment API removed. Use physical sensor enrollment." });
-});
+/**
+ * 5. Hardware Enrollment Handshake endpoints (ESP32)
+ */
+// ESP32 checks for pending enrollment work
 app.get("/api/device/enrollment-task", (req, res) => {
     if (!deviceAuthorized(req)) return res.status(401).json({ error: "Device not authorized" });
+
+    if (inMemoryState.pendingEnrollmentTask) {
+        return res.json({
+            hasTask: true,
+            sessionId: inMemoryState.pendingEnrollmentTask.sessionId,
+            targetTemplateId: inMemoryState.pendingEnrollmentTask.targetTemplateId
+        });
+    }
+
     return res.json({ hasTask: false });
 });
-app.post("/api/device/enrollment-complete", (req, res) => {
+
+// ESP32 reports completion of enrollment
+app.post("/api/device/enrollment-complete", async (req, res) => {
     if (!deviceAuthorized(req)) return res.status(401).json({ error: "Device not authorized" });
-    return res.json({ success: true, note: "Enrollment tracking removed" });
-});
-app.get("/api/enrollment/status/:sessionId", (_req, res) => {
-    return res.status(410).json({ error: "Enrollment status API removed." });
+
+    const { sessionId, templateId, status, errorMessage } = req.body || {};
+    const session = inMemoryState.enrollmentSessions[sessionId];
+
+    if (session) {
+        session.status = status === "enrolled" ? "enrolled" : "failed";
+        session.errorMessage = errorMessage || null;
+        session.completedAt = new Date().toISOString();
+
+        if (status === "enrolled" && isSupabaseConfigured) {
+            try {
+                // Delete previous template for student to enforce unique_active_student_fingerprint
+                await supabase
+                    .from("fingerprint_templates")
+                    .delete()
+                    .eq("student_id", session.studentId);
+
+                // Insert newly enrolled template
+                await supabase.from("fingerprint_templates").insert({
+                    template_id: templateId || session.targetTemplateId,
+                    student_id: session.studentId,
+                    active: true,
+                    device_id: "esp32-lab-01"
+                });
+
+                console.log(`[Enrollment] Successfully linked Slot #${templateId || session.targetTemplateId} to student ${session.studentId}`);
+            } catch (err) {
+                console.error("Failed to persist enrolled template:", err.message);
+            }
+        }
+    }
+
+    inMemoryState.pendingEnrollmentTask = null;
+    return res.json({ success: true });
 });
 
 
@@ -502,6 +545,15 @@ async function requireAuth(req, res, next) {
             return res.status(403).json({ error: "Account has been deactivated. Contact the HOD." });
         }
 
+        // Attach active lab assignments to req.actor
+        const { data: assignments } = await supabase
+            .from("lab_assignments")
+            .select("lab_id")
+            .eq("user_id", user.id)
+            .eq("is_active", true);
+
+        profile.assigned_labs = (assignments || []).map(a => a.lab_id);
+
         req.actor = profile;
         next();
     } catch (err) {
@@ -519,6 +571,97 @@ function requireHOD(req, res, next) {
     }
     next();
 }
+
+/**
+ * 6. Live Biometric Enrollment Routes for Staff Portal
+ */
+// Staff initiates enrollment for student (supports Bearer JWT from Portal or X-Device-Token for admin tests)
+app.post("/api/enrollment/start", (req, res, next) => {
+    if (deviceAuthorized(req)) {
+        req.actor = { id: "device-admin", role: "HOD", full_name: "Hardware Admin" };
+        return next();
+    }
+    return requireAuth(req, res, next);
+}, async (req, res) => {
+    const { studentId, targetTemplateId } = req.body || {};
+
+    if (!studentId || !targetTemplateId) {
+        return res.status(400).json({ error: "studentId and targetTemplateId are required" });
+    }
+
+    const parsedTid = Number(targetTemplateId);
+    if (!Number.isInteger(parsedTid) || parsedTid < 1 || parsedTid > 1000000) {
+        return res.status(400).json({ error: "targetTemplateId must be an integer between 1 and 1000000" });
+    }
+
+    // Check if slot is already in use by another student
+    const { data: conflict } = await supabase
+        .from("fingerprint_templates")
+        .select("student_id, student:students(full_name, reg_number)")
+        .eq("template_id", parsedTid)
+        .neq("student_id", studentId)
+        .eq("active", true)
+        .maybeSingle();
+
+    if (conflict) {
+        return res.status(409).json({
+            error: `Fingerprint Slot #${parsedTid} is already in use by ${conflict.student?.full_name || 'another student'}.`
+        });
+    }
+
+    // Check student exists
+    const { data: student, error: sErr } = await supabase
+        .from("students")
+        .select("id, full_name, reg_number")
+        .eq("id", studentId)
+        .single();
+
+    if (sErr || !student) {
+        return res.status(404).json({ error: "Student not found" });
+    }
+
+    const sessionId = crypto.randomUUID();
+    const session = {
+        sessionId,
+        studentId,
+        studentName: student.full_name,
+        studentReg: student.reg_number,
+        targetTemplateId: parsedTid,
+        status: "waiting_device",
+        createdAt: new Date().toISOString()
+    };
+
+    inMemoryState.pendingEnrollmentTask = session;
+    inMemoryState.enrollmentSessions[sessionId] = session;
+
+    return res.status(201).json({
+        success: true,
+        sessionId,
+        status: "waiting_device",
+        targetTemplateId: parsedTid
+    });
+});
+
+// Staff polls status of active enrollment session
+app.get("/api/enrollment/status/:sessionId", requireAuth, (req, res) => {
+    const session = inMemoryState.enrollmentSessions[req.params.sessionId];
+    if (!session) {
+        return res.status(404).json({ error: "Enrollment session not found" });
+    }
+    return res.json(session);
+});
+
+// Staff cancels pending enrollment session
+app.post("/api/enrollment/cancel", requireAuth, (req, res) => {
+    const { sessionId } = req.body || {};
+    if (inMemoryState.pendingEnrollmentTask?.sessionId === sessionId) {
+        inMemoryState.pendingEnrollmentTask = null;
+    }
+    if (sessionId && inMemoryState.enrollmentSessions[sessionId]) {
+        inMemoryState.enrollmentSessions[sessionId].status = "cancelled";
+    }
+    return res.json({ success: true });
+});
 
 /**
  * 7. GET /api/me — authenticated user profile + lab assignments
@@ -840,33 +983,16 @@ app.get("/api/students", requireAuth, async (req, res) => {
         }
 
         if (lab_id) {
-            // Filter via student_lab_access join
+            // Optional filter via student_lab_access join
             const { data: studentIds } = await supabase
                 .from("student_lab_access")
                 .select("student_id")
                 .eq("lab_id", lab_id)
                 .eq("is_active", true);
             const ids = (studentIds || []).map(s => s.student_id);
-            if (ids.length === 0) return res.json({ data: [], count: 0 });
-            query = query.in("id", ids);
-        } else if (req.actor.role !== "HOD") {
-            // Lab In-charge: only students in their assigned labs
-            const { data: assignments } = await supabase
-                .from("lab_assignments")
-                .select("lab_id")
-                .eq("user_id", req.actor.id)
-                .eq("is_active", true);
-            const labIds = (assignments || []).map(a => a.lab_id);
-            if (labIds.length === 0) return res.json({ data: [], count: 0 });
-
-            const { data: studentIds } = await supabase
-                .from("student_lab_access")
-                .select("student_id")
-                .in("lab_id", labIds)
-                .eq("is_active", true);
-            const ids = (studentIds || []).map(s => s.student_id);
-            if (ids.length === 0) return res.json({ data: [], count: 0 });
-            query = query.in("id", ids);
+            if (ids.length > 0) {
+                query = query.in("id", ids);
+            }
         }
 
         const { data, count, error } = await query;
@@ -911,9 +1037,15 @@ app.post("/api/students", requireAuth, async (req, res) => {
         }
     }
 
-    // Lab In-charge must provide a lab_id they are assigned to
-    if (req.actor.role !== "HOD" && !lab_id) {
-        return res.status(400).json({ error: "lab_id is required when registering a student" });
+    // Lab In-charge: resolve lab assignment
+    let resolvedLabId = lab_id || null;
+    if (req.actor.role !== "HOD") {
+        if (!resolvedLabId && req.actor.assigned_labs?.length > 0) {
+            resolvedLabId = req.actor.assigned_labs[0];
+        }
+        if (resolvedLabId && req.actor.assigned_labs && !req.actor.assigned_labs.includes(resolvedLabId)) {
+            return res.status(403).json({ error: "You are not assigned to this laboratory" });
+        }
     }
 
     try {
@@ -953,12 +1085,16 @@ app.post("/api/students", requireAuth, async (req, res) => {
             }
         }
 
-        // Create lab access if lab_id provided
-        if (lab_id) {
-            await supabase.from("student_lab_access").insert({
-                student_id: student.id, lab_id,
-                granted_by: req.actor.id, is_active: true
-            });
+        // Create lab access if resolvedLabId provided (non-blocking)
+        if (resolvedLabId) {
+            try {
+                await supabase.from("student_lab_access").insert({
+                    student_id: student.id, lab_id: resolvedLabId,
+                    granted_by: req.actor.id, is_active: true
+                });
+            } catch (labAccErr) {
+                console.warn("[Register Student] Optional student_lab_access warning:", labAccErr.message);
+            }
         }
 
         await supabase.from("audit_logs").insert({

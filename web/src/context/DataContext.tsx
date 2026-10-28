@@ -16,8 +16,7 @@ import {
 } from '@/types';
 import { useAuth } from './AuthContext';
 import { isSupabaseConfigured, supabase } from '@/lib/supabaseClient';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3000';
+import { apiClient, API_BASE_URL } from '@/lib/apiClient';
 
 const EMPTY_STATS: DashboardStats = {
   total_students: 0,
@@ -82,23 +81,15 @@ interface DataContextType {
   addStaff: (staffData: Omit<StaffProfile, 'id' | 'created_at' | 'updated_at'> & { password?: string; lab_ids?: string[] }) => Promise<{ success: boolean; error?: string }>;
   toggleStaffStatus: (id: string) => Promise<{ success: boolean; error?: string }>;
   simulateHardwareScan: (templateId: number, isTest?: boolean) => Promise<{ success: boolean; error?: string }>;
+  startEnrollment: (studentId: string, targetTemplateId: number) => Promise<{ success: boolean; sessionId?: string; error?: string }>;
+  cancelEnrollment: () => Promise<void>;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
 
-async function apiFetch(path: string, options?: RequestInit, token?: string | null) {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options?.headers as Record<string, string> || {})
-  };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+// Forwarding helper to preserve compatibility with all internal calls
+async function apiFetch<T = any>(path: string, options?: RequestInit, _token?: string | null): Promise<T> {
+  return apiClient<T>(path, options);
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
@@ -257,19 +248,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     fetchAll().finally(() => setIsLoading(false));
   }, [currentUser, fetchAll]);
 
+  const fetchAllRef = useRef(fetchAll);
+  fetchAllRef.current = fetchAll;
+  const fetchStatsRef = useRef(fetchStats);
+  fetchStatsRef.current = fetchStats;
+
   // Set up Supabase Realtime subscriptions
   useEffect(() => {
-    if (!isSupabaseConfigured || !currentUser) return;
+    if (!isSupabaseConfigured || !currentUser?.id) return;
 
-    // Clean up previous channel
-    if (channelRef.current) {
-      supabase.removeChannel(channelRef.current);
-    }
-
+    let isMounted = true;
     const channel = supabase
-      .channel('smartlab-realtime')
+      .channel(`smartlab-realtime-${currentUser.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment' },
         (payload) => {
+          if (!isMounted) return;
           if (payload.eventType === 'INSERT') {
             setEquipment(prev => [payload.new as Equipment, ...prev]);
           } else if (payload.eventType === 'UPDATE') {
@@ -277,56 +270,62 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           } else if (payload.eventType === 'DELETE') {
             setEquipment(prev => prev.filter(e => e.id !== payload.old.id));
           }
-          fetchStats();
+          fetchStatsRef.current();
         }
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment_transactions' },
         (payload) => {
+          if (!isMounted) return;
           if (payload.eventType === 'INSERT') {
-            // Refresh full transactions to get joined data
-            fetchAll();
+            fetchAllRef.current();
           } else if (payload.eventType === 'UPDATE') {
             setTransactions(prev =>
               prev.map(t => t.id === payload.new.id ? { ...t, ...payload.new } : t)
             );
-            fetchStats();
+            fetchStatsRef.current();
           }
         }
       )
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'students' },
         (payload) => {
+          if (!isMounted) return;
           setStudents(prev => [payload.new as Student, ...prev]);
-          fetchStats();
+          fetchStatsRef.current();
         }
       )
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students' },
         (payload) => {
+          if (!isMounted) return;
           setStudents(prev => prev.map(s => s.id === payload.new.id ? { ...s, ...payload.new } : s));
         }
       )
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'scan_events' },
         (payload) => {
+          if (!isMounted) return;
           setScans(prev => [payload.new as ScanEvent, ...prev.slice(0, 49)]);
-          fetchStats();
+          fetchStatsRef.current();
         }
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'laboratories' },
         () => {
-          fetchAll();
+          if (!isMounted) return;
+          fetchAllRef.current();
         }
       )
       .subscribe((status) => {
+        if (!isMounted) return;
         setRealtimeConnected(status === 'SUBSCRIBED');
       });
 
     channelRef.current = channel;
 
     return () => {
+      isMounted = false;
       supabase.removeChannel(channel);
       channelRef.current = null;
       setRealtimeConnected(false);
     };
-  }, [currentUser, fetchAll, fetchStats]);
+  }, [currentUser?.id]);
 
   const refreshAll = useCallback(async () => {
     setIsRefreshing(true);
@@ -547,6 +546,61 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   }, [fetchAll]);
 
+  // ─── BIOMETRIC ENROLLMENT ──────────────────────────────────────────────────
+  const startEnrollment = useCallback(async (studentId: string, targetTemplateId: number) => {
+    try {
+      const token = sessionTokenRef.current;
+      const res = await apiFetch<EnrollmentSession>('/api/enrollment/start', {
+        method: 'POST',
+        body: JSON.stringify({ studentId, targetTemplateId })
+      }, token);
+      setEnrollmentSession(res);
+      return { success: true, sessionId: res.sessionId };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to start enrollment' };
+    }
+  }, []);
+
+  const cancelEnrollment = useCallback(async () => {
+    if (!enrollmentSession?.sessionId) {
+      setEnrollmentSession(null);
+      return;
+    }
+    try {
+      const token = sessionTokenRef.current;
+      await apiFetch('/api/enrollment/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: enrollmentSession.sessionId })
+      }, token);
+    } catch { /* ignore */ }
+    setEnrollmentSession(null);
+  }, [enrollmentSession]);
+
+  // Polling enrollment session status while active
+  useEffect(() => {
+    if (!enrollmentSession || ['enrolled', 'failed', 'cancelled'].includes(enrollmentSession.status)) {
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        const token = sessionTokenRef.current;
+        const status = await apiFetch<EnrollmentSession>(`/api/enrollment/status/${enrollmentSession.sessionId}`, {}, token);
+        if (status) {
+          setEnrollmentSession(status);
+          if (status.status === 'enrolled') {
+            await fetchAll();
+            await fetchStats();
+          }
+        }
+      } catch {
+        // Silently continue polling
+      }
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, [enrollmentSession, fetchAll, fetchStats]);
+
   return (
     <DataContext.Provider
       value={{
@@ -558,7 +612,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         addStudent, updateStudent, toggleStudentStatus,
         addEquipment, updateEquipment, deleteEquipment,
         addStaff, toggleStaffStatus,
-        simulateHardwareScan
+        simulateHardwareScan,
+        startEnrollment, cancelEnrollment
       }}
     >
       {children}

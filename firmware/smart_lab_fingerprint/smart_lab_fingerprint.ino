@@ -37,11 +37,13 @@ const char* DEVICE_ID    = "esp32-lab-01";
 #define ONBOARD_LED     2
 
 // --- Operational Timers ---
-const unsigned long HEARTBEAT_INTERVAL_MS   = 30000; // Heartbeat every 30s
-const unsigned long WIFI_RETRY_INTERVAL_MS   = 10000; // Retry WiFi every 10s
+const unsigned long HEARTBEAT_INTERVAL_MS         = 30000; // Heartbeat every 30s
+const unsigned long WIFI_RETRY_INTERVAL_MS        = 10000; // Retry WiFi every 10s
+const unsigned long ENROLL_TASK_CHECK_INTERVAL_MS = 5000;  // Check web enrollment task every 5s
 
-unsigned long lastHeartbeatTime = 0;
-unsigned long lastWiFiRetryTime = 0;
+unsigned long lastHeartbeatTime       = 0;
+unsigned long lastWiFiRetryTime       = 0;
+unsigned long lastEnrollTaskCheckTime = 0;
 bool sensorDetected = false;
 
 // Hardware Serial 2 for fingerprint sensor
@@ -143,6 +145,40 @@ bool sendHttpsPost(const String& path, const String& jsonBody, String& responseO
 }
 
 // ----------------------------------------------------------------------------
+// HTTPS GET Dispatcher (for polling enrollment tasks)
+// ----------------------------------------------------------------------------
+bool sendHttpsGet(const String& path, String& responseOut) {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+    if (WiFi.status() != WL_CONNECTED) return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String fullUrl = String(BASE_URL) + path;
+
+  if (!http.begin(client, fullUrl)) {
+    return false;
+  }
+
+  http.setTimeout(8000);
+  http.addHeader("X-Device-Token", DEVICE_TOKEN);
+
+  int statusCode = http.GET();
+  bool ok = false;
+
+  if (statusCode >= 200 && statusCode < 300) {
+    responseOut = http.getString();
+    ok = true;
+  }
+
+  http.end();
+  return ok;
+}
+
+// ----------------------------------------------------------------------------
 // 1. Telemetry Heartbeat (Keeps ESP32 "Online" on Web Dashboard)
 // ----------------------------------------------------------------------------
 void dispatchHeartbeat() {
@@ -153,7 +189,7 @@ void dispatchHeartbeat() {
                 + "\"freeHeap\":" + String(ESP.getFreeHeap()) + ","
                 + "\"rssi\":" + String(WiFi.RSSI()) + ","
                 + "\"ipAddress\":\"" + WiFi.localIP().toString() + "\","
-                + "\"firmwareVersion\":\"1.3.0\"}";
+                + "\"firmwareVersion\":\"2.0.0\"}";
 
   String response;
   if (sendHttpsPost("/api/device/heartbeat", body, response)) {
@@ -184,13 +220,13 @@ bool sendScanEvent(int templateId, int confidence) {
 }
 
 // ----------------------------------------------------------------------------
-// 3. Hardware Fingerprint Scanning
+// 3. Hardware Fingerprint Scanning (1:N match on sensor flash)
 // ----------------------------------------------------------------------------
 void handleFingerprintScanning() {
   if (!sensorDetected) return;
 
   int p = finger.getImage();
-  if (p == FINGERPRINT_NOFINGER) return; // No finger placed
+  if (p == FINGERPRINT_NOFINGER) return;
 
   if (p != FINGERPRINT_OK) {
     Serial.println("[Scan] Sensor read error.");
@@ -203,23 +239,170 @@ void handleFingerprintScanning() {
     return;
   }
 
-  // Search local sensor database (1:N matching)
   p = finger.fingerFastSearch();
   if (p == FINGERPRINT_OK) {
     Serial.printf("\n[Scan] Match Found! Template ID: #%d (Confidence: %d)\n", finger.fingerID, finger.confidence);
     sendScanEvent(finger.fingerID, finger.confidence);
   } else if (p == FINGERPRINT_NOTFOUND) {
     Serial.println("\n[Scan] Fingerprint not recognized (Unregistered student).");
-    sendScanEvent(0, 0); // Sentinel ID 0 for unrecognized student scan
+    sendScanEvent(0, 0);
   } else {
     Serial.println("[Scan] Sensor search error.");
   }
 
-  delay(1500); // Debounce delay
+  delay(1500);
 }
 
 // ----------------------------------------------------------------------------
-// 4. Serial Monitor Input (Keyboard Simulation Test)
+// 4. Web-Initiated Fingerprint Enrollment
+//    Lab In-charge triggers enrollment from the website.
+//    ESP32 polls for tasks, guides the user through 2-touch enrollment,
+//    stores the template on the sensor, and reports back to the server.
+// ----------------------------------------------------------------------------
+bool enrollFingerprint(int slotId) {
+  if (!sensorDetected) {
+    Serial.println("[Enroll] ERROR: Sensor not detected, cannot enroll.");
+    return false;
+  }
+
+  Serial.printf("\n[Enroll] ============ ENROLLING SLOT #%d ============\n", slotId);
+  Serial.println("[Enroll] Place the student's finger on the sensor...");
+  blinkOnboardLed(3, 150);
+
+  // --- First touch: capture image into CharBuffer 1 ---
+  int p = -1;
+  unsigned long startWait = millis();
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      Serial.println("[Enroll] First image captured successfully.");
+    } else if (p == FINGERPRINT_NOFINGER) {
+      // Keep waiting, but timeout after 30 seconds
+      if (millis() - startWait > 30000) {
+        Serial.println("[Enroll] TIMEOUT: No finger detected after 30s. Aborting.");
+        return false;
+      }
+      delay(100);
+    } else {
+      Serial.println("[Enroll] First image capture error.");
+      return false;
+    }
+  }
+
+  p = finger.image2Tz(1); // Store features in CharBuffer 1
+  if (p != FINGERPRINT_OK) {
+    Serial.println("[Enroll] Failed to extract features from first image.");
+    return false;
+  }
+
+  Serial.println("[Enroll] Remove finger from sensor...");
+  blinkOnboardLed(1, 300);
+  delay(1500);
+
+  // Wait for finger to be removed
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+    delay(100);
+  }
+
+  // --- Second touch: capture image into CharBuffer 2 ---
+  Serial.println("[Enroll] Place the SAME finger again...");
+  blinkOnboardLed(3, 150);
+
+  p = -1;
+  startWait = millis();
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      Serial.println("[Enroll] Second image captured successfully.");
+    } else if (p == FINGERPRINT_NOFINGER) {
+      if (millis() - startWait > 30000) {
+        Serial.println("[Enroll] TIMEOUT: No finger detected for second touch. Aborting.");
+        return false;
+      }
+      delay(100);
+    } else {
+      Serial.println("[Enroll] Second image capture error.");
+      return false;
+    }
+  }
+
+  p = finger.image2Tz(2); // Store features in CharBuffer 2
+  if (p != FINGERPRINT_OK) {
+    Serial.println("[Enroll] Failed to extract features from second image.");
+    return false;
+  }
+
+  // --- Create model from both buffers ---
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    Serial.println("[Enroll] Fingerprints did not match. Please try again.");
+    return false;
+  }
+  Serial.println("[Enroll] Fingerprint model created successfully!");
+
+  // --- Store the model in the sensor's flash at the target slot ---
+  p = finger.storeModel(slotId);
+  if (p != FINGERPRINT_OK) {
+    Serial.printf("[Enroll] Failed to store model at slot #%d (error %d).\n", slotId, p);
+    return false;
+  }
+
+  Serial.printf("[Enroll] *** SUCCESS! Template stored at Slot #%d ***\n", slotId);
+  blinkOnboardLed(5, 80);
+  return true;
+}
+
+void reportEnrollmentComplete(const String& sessionId, int templateId, bool success, const String& errorMsg) {
+  String body = "{\"sessionId\":\"" + sessionId + "\","
+                + "\"templateId\":" + String(templateId) + ","
+                + "\"status\":\"" + (success ? "enrolled" : "failed") + "\"";
+  if (!success && errorMsg.length() > 0) {
+    body += ",\"errorMessage\":\"" + errorMsg + "\"";
+  }
+  body += "}";
+
+  String response;
+  sendHttpsPost("/api/device/enrollment-complete", body, response);
+  Serial.println("[Enroll] Enrollment result reported to server.");
+}
+
+void checkAndRunEnrollmentTask() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  String response;
+  if (!sendHttpsGet("/api/device/enrollment-task", response)) return;
+
+  // Minimal JSON parsing using ArduinoJson
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, response);
+  if (err) return;
+
+  bool hasTask = doc["hasTask"] | false;
+  if (!hasTask) return;
+
+  const char* sessionId = doc["sessionId"] | "";
+  int targetTemplateId  = doc["targetTemplateId"] | 0;
+
+  if (targetTemplateId < 1 || strlen(sessionId) == 0) return;
+
+  Serial.println("\n================================================================");
+  Serial.printf("[Enroll] ** WEB ENROLLMENT REQUEST RECEIVED **\n");
+  Serial.printf("[Enroll] Session: %s\n", sessionId);
+  Serial.printf("[Enroll] Target Slot: #%d\n", targetTemplateId);
+  Serial.println("================================================================");
+
+  bool success = enrollFingerprint(targetTemplateId);
+
+  reportEnrollmentComplete(
+    String(sessionId),
+    targetTemplateId,
+    success,
+    success ? "" : "Enrollment failed on device"
+  );
+}
+
+// ----------------------------------------------------------------------------
+// 5. Serial Monitor Input (Keyboard Simulation Test)
 // ----------------------------------------------------------------------------
 void handleSerialInput() {
   if (Serial.available()) {
@@ -262,7 +445,8 @@ void setup() {
 
   Serial.println("\n========================================================");
   Serial.println(" KARE SMART LAB EQUIPMENT MANAGEMENT SYSTEM");
-  Serial.println(" ESP32 Controller & Fingerprint Scanner (Production v1.3.0)");
+  Serial.println(" ESP32 Controller & Fingerprint Scanner (Production v2.0.0)");
+  Serial.println(" Web-Initiated Enrollment + Scan Verification");
   Serial.println("========================================================");
 
   // Initialize Fingerprint Sensor on Serial2 (RX=16, TX=17)
@@ -292,7 +476,8 @@ void setup() {
   dispatchHeartbeat();
 
   Serial.println("\n[Ready] System is active and listening!");
-  Serial.println("[Ready] Place finger on sensor to scan, OR type a template number in Serial Monitor.\n");
+  Serial.println("[Ready] Place finger on sensor to scan, OR type a template number in Serial Monitor.");
+  Serial.println("[Ready] Web-initiated enrollment is ENABLED — the website can trigger enrollment.\n");
 }
 
 // ----------------------------------------------------------------------------
@@ -315,10 +500,16 @@ void loop() {
     dispatchHeartbeat();
   }
 
-  // 3. Fast Fingerprint Scanning Loop
+  // 3. Check for web-initiated enrollment tasks (Every 5s)
+  if (currentMillis - lastEnrollTaskCheckTime >= ENROLL_TASK_CHECK_INTERVAL_MS) {
+    lastEnrollTaskCheckTime = currentMillis;
+    checkAndRunEnrollmentTask();
+  }
+
+  // 4. Fast Fingerprint Scanning Loop
   handleFingerprintScanning();
 
-  // 4. Serial Monitor keyboard input for manual simulation
+  // 5. Serial Monitor keyboard input for manual simulation
   handleSerialInput();
 
   delay(20);
