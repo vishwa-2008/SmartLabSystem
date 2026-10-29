@@ -456,10 +456,16 @@ app.get("/api/device/enrollment-task", (req, res) => {
     if (!deviceAuthorized(req)) return res.status(401).json({ error: "Device not authorized" });
 
     if (inMemoryState.pendingEnrollmentTask) {
+        const task = inMemoryState.pendingEnrollmentTask;
+        // Mark session as active/ready on sensor so portal UI immediately updates
+        if (inMemoryState.enrollmentSessions[task.sessionId]) {
+            inMemoryState.enrollmentSessions[task.sessionId].status = "ready_for_finger";
+        }
+
         return res.json({
             hasTask: true,
-            sessionId: inMemoryState.pendingEnrollmentTask.sessionId,
-            targetTemplateId: inMemoryState.pendingEnrollmentTask.targetTemplateId
+            sessionId: task.sessionId,
+            targetTemplateId: task.targetTemplateId
         });
     }
 
@@ -1222,6 +1228,70 @@ app.patch("/api/students/:id", requireAuth, async (req, res) => {
         });
     } catch (err) {
         return res.status(500).json({ error: "Failed to update student: " + (err.message || "") });
+    }
+});
+
+/**
+ * 17b. DELETE /api/students/:id — remove student (guarded against active equipment loans)
+ */
+app.delete("/api/students/:id", requireAuth, async (req, res) => {
+    try {
+        const studentId = req.params.id;
+
+        // Check student exists
+        const { data: student, error: fetchErr } = await supabase
+            .from("students")
+            .select("id, reg_number, full_name")
+            .eq("id", studentId)
+            .single();
+
+        if (fetchErr || !student) {
+            return res.status(404).json({ error: "Student not found" });
+        }
+
+        // Guard: Prevent deletion if student currently has active or overdue borrowed equipment
+        const { data: activeLoans, error: loanErr } = await supabase
+            .from("equipment_transactions")
+            .select("id, equipment:equipment(name)")
+            .eq("student_id", studentId)
+            .in("status", ["active", "overdue"])
+            .limit(1);
+
+        if (loanErr) throw loanErr;
+
+        if (activeLoans && activeLoans.length > 0) {
+            return res.status(409).json({
+                error: `Cannot delete student: ${student.full_name} has outstanding equipment that must be returned first.`
+            });
+        }
+
+        // Delete associated fingerprint template
+        await supabase
+            .from("fingerprint_templates")
+            .delete()
+            .eq("student_id", studentId);
+
+        // Delete the student record
+        const { error: delErr } = await supabase
+            .from("students")
+            .delete()
+            .eq("id", studentId);
+
+        if (delErr) throw delErr;
+
+        // Log audit trail
+        await supabase.from("audit_logs").insert({
+            actor_id: req.actor.id,
+            action: "DELETE_STUDENT",
+            entity_type: "students",
+            entity_id: studentId,
+            details: { reg_number: student.reg_number, full_name: student.full_name }
+        });
+
+        return res.json({ success: true, message: "Student deleted successfully" });
+    } catch (err) {
+        console.error("Failed to delete student:", err.message);
+        return res.status(500).json({ error: "Failed to delete student: " + (err.message || "") });
     }
 });
 

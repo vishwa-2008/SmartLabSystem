@@ -37,6 +37,7 @@ export default function StudentsPage() {
     scans,
     addStudent,
     updateStudent,
+    deleteStudent,
     toggleStudentStatus,
     startEnrollment,
     cancelEnrollment,
@@ -121,6 +122,30 @@ export default function StudentsPage() {
     setIsEditModalOpen(true);
   };
 
+  // Calculate lowest available slot (1 to 1000)
+  const getNextAvailableSlot = (): number => {
+    const occupied = new Set(
+      students
+        .map(s => s.template_id)
+        .filter((tid): tid is number => typeof tid === 'number' && tid > 0)
+    );
+    for (let i = 1; i <= 1000; i++) {
+      if (!occupied.has(i)) return i;
+    }
+    return 1;
+  };
+
+  // Open Fingerprint Enrollment Modal with smart auto-suggested slot
+  const openEnrollmentModal = (student: Student) => {
+    setFingerprintModalStudent(student);
+    setFingerprintError(null);
+    if (student.template_id) {
+      setQuickSlot(String(student.template_id));
+    } else {
+      setQuickSlot(String(getNextAvailableSlot()));
+    }
+  };
+
   // Open Details Modal
   const openDetailModal = (student: Student) => {
     setSelectedStudent(student);
@@ -176,6 +201,19 @@ export default function StudentsPage() {
       setFormError(res.error || 'Failed to update student');
     } else {
       setIsEditModalOpen(false);
+    }
+  };
+
+  // Handle Delete Student
+  const handleDeleteStudent = async (student: Student) => {
+    const confirmed = window.confirm(
+      `Are you sure you want to delete ${student.full_name} (${student.reg_number})?\n\nThis will remove their profile and release any registered fingerprint slot. This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    const res = await deleteStudent(student.id);
+    if (!res.success) {
+      alert(res.error || 'Failed to delete student');
     }
   };
 
@@ -359,13 +397,9 @@ export default function StudentsPage() {
                     <td className="px-5 py-3">
                       <button
                         type="button"
-                        onClick={() => {
-                          setFingerprintModalStudent(student);
-                          setQuickSlot(student.template_id ? String(student.template_id) : '');
-                          setFingerprintError(null);
-                        }}
+                        onClick={() => openEnrollmentModal(student)}
                         className="group text-left inline-block"
-                        title="Click to assign or edit sensor slot"
+                        title="Click to enroll or change fingerprint"
                       >
                         {student.fingerprint_enrolled ? (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 group-hover:bg-emerald-100 transition-colors">
@@ -375,7 +409,7 @@ export default function StudentsPage() {
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200 group-hover:bg-amber-100 transition-colors">
                             <Fingerprint className="w-3.5 h-3.5 text-amber-500" />
-                            <span>Assign Slot</span>
+                            <span>Enroll Fingerprint</span>
                           </span>
                         )}
                       </button>
@@ -387,13 +421,9 @@ export default function StudentsPage() {
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => {
-                          setFingerprintModalStudent(student);
-                          setQuickSlot(student.template_id ? String(student.template_id) : '');
-                          setFingerprintError(null);
-                        }}
+                        onClick={() => openEnrollmentModal(student)}
                         className="h-7 w-7 p-0 text-[#1B4998] hover:text-[#1B4998] hover:bg-blue-50"
-                        title={student.fingerprint_enrolled ? `Edit Fingerprint Slot (Slot #${student.template_id})` : 'Assign Fingerprint Slot'}
+                        title={student.fingerprint_enrolled ? `Change Fingerprint (Slot #${student.template_id})` : 'Enroll Fingerprint'}
                       >
                         <Fingerprint className="w-3.5 h-3.5" />
                       </Button>
@@ -430,6 +460,16 @@ export default function StudentsPage() {
                         ) : (
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                         )}
+                      </Button>
+
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleDeleteStudent(student)}
+                        className="h-7 w-7 p-0 text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                        title="Delete Student"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </Button>
                     </td>
                   </tr>
@@ -809,16 +849,52 @@ export default function StudentsPage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="space-y-3">
-                    <Input
-                      label="Target Optical Sensor Slot (1 - 1000)"
-                      type="number"
-                      min={1}
-                      max={1000}
-                      placeholder="e.g. 1"
-                      value={quickSlot}
-                      onChange={e => setQuickSlot(e.target.value)}
-                    />
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                      <div className="p-2.5 rounded-lg border border-slate-200 bg-white">
+                        <div className="w-5 h-5 rounded-full bg-blue-100 text-[#1B4998] font-bold text-[11px] flex items-center justify-center mx-auto mb-1">
+                          1
+                        </div>
+                        <div className="font-medium text-slate-800 text-[11px]">Click Enroll</div>
+                        <div className="text-[10px] text-slate-400">Sends task to ESP32</div>
+                      </div>
+                      <div className="p-2.5 rounded-lg border border-slate-200 bg-white">
+                        <div className="w-5 h-5 rounded-full bg-blue-100 text-[#1B4998] font-bold text-[11px] flex items-center justify-center mx-auto mb-1">
+                          2
+                        </div>
+                        <div className="font-medium text-slate-800 text-[11px]">Touch 1st Time</div>
+                        <div className="text-[10px] text-slate-400">Scan & lift finger</div>
+                      </div>
+                      <div className="p-2.5 rounded-lg border border-slate-200 bg-white">
+                        <div className="w-5 h-5 rounded-full bg-blue-100 text-[#1B4998] font-bold text-[11px] flex items-center justify-center mx-auto mb-1">
+                          3
+                        </div>
+                        <div className="font-medium text-slate-800 text-[11px]">Touch 2nd Time</div>
+                        <div className="text-[10px] text-slate-400">Confirm & store slot</div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <Input
+                        label="Optical Sensor Hardware Slot (1 - 1000)"
+                        type="number"
+                        min={1}
+                        max={1000}
+                        placeholder="e.g. 1"
+                        value={quickSlot}
+                        onChange={e => setQuickSlot(e.target.value)}
+                      />
+                      <div className="text-[11px] text-slate-500 flex items-center justify-between px-0.5">
+                        <span>Auto-suggested lowest free slot on the sensor</span>
+                        <button
+                          type="button"
+                          onClick={() => setQuickSlot(String(getNextAvailableSlot()))}
+                          className="text-[#1B4998] hover:underline font-medium text-[11px]"
+                        >
+                          Reset to Next Free (#{getNextAvailableSlot()})
+                        </button>
+                      </div>
+                    </div>
 
                     <div className="pt-2 flex justify-end gap-2">
                       <Button
@@ -834,7 +910,7 @@ export default function StudentsPage() {
                         isLoading={isInitiatingEnrollment}
                         leftIcon={<Radio className="w-3.5 h-3.5" />}
                       >
-                        Trigger Live Sensor Enrollment
+                        Start Live Biometric Enrollment
                       </Button>
                     </div>
                   </div>
@@ -939,12 +1015,10 @@ export default function StudentsPage() {
                 onClick={() => {
                   const s = selectedStudent;
                   setIsDetailModalOpen(false);
-                  setFingerprintModalStudent(s);
-                  setQuickSlot(s.template_id ? String(s.template_id) : '');
-                  setFingerprintError(null);
+                  openEnrollmentModal(s);
                 }}
               >
-                {selectedStudent.fingerprint_enrolled ? 'Change Slot' : 'Assign Slot'}
+                {selectedStudent.fingerprint_enrolled ? 'Change Fingerprint' : 'Enroll Fingerprint'}
               </Button>
             </div>
 
@@ -975,6 +1049,31 @@ export default function StudentsPage() {
                     ))
                 )}
               </div>
+            </div>
+
+            {/* Modal Actions Footer */}
+            <div className="pt-3 border-t border-slate-200 flex items-center justify-between">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-rose-600 hover:text-rose-700 hover:bg-rose-50 text-xs"
+                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                onClick={() => {
+                  const s = selectedStudent;
+                  setIsDetailModalOpen(false);
+                  handleDeleteStudent(s);
+                }}
+              >
+                Delete Student
+              </Button>
+
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => setIsDetailModalOpen(false)}
+              >
+                Close
+              </Button>
             </div>
           </div>
         </Modal>

@@ -74,6 +74,7 @@ interface DataContextType {
   }) => Promise<{ data: EquipmentTransaction[]; count: number }>;
   addStudent: (student: Omit<Student, 'id' | 'created_at'> & { lab_id?: string; template_id?: number | null }) => Promise<{ success: boolean; error?: string }>;
   updateStudent: (id: string, student: Partial<Student> & { template_id?: number | null }) => Promise<{ success: boolean; error?: string }>;
+  deleteStudent: (id: string) => Promise<{ success: boolean; error?: string }>;
   addEquipment: (item: Omit<Equipment, 'id' | 'created_at'>) => Promise<{ success: boolean; error?: string }>;
   updateEquipment: (id: string, item: Partial<Equipment>) => Promise<{ success: boolean; error?: string }>;
   deleteEquipment: (id: string) => Promise<{ success: boolean; error?: string }>;
@@ -458,6 +459,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   }, [fetchStats]);
 
+  // ─── DELETE STUDENT ─────────────────────────────────────────────────────────
+  const deleteStudent = useCallback(async (id: string) => {
+    try {
+      const token = sessionTokenRef.current;
+      await apiFetch(`/api/students/${id}`, { method: 'DELETE' }, token);
+      setStudents(prev => prev.filter(s => s.id !== id));
+      await fetchStats();
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to delete student' };
+    }
+  }, [fetchStats]);
+
   // ─── TOGGLE STUDENT STATUS ──────────────────────────────────────────────────
   const toggleStudentStatus = useCallback(async (id: string) => {
     const student = students.find(s => s.id === id);
@@ -609,7 +623,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         enrollmentSession,
         refreshAll, refreshStats,
         issueEquipment, returnEquipment, fetchOutstanding,
-        addStudent, updateStudent, toggleStudentStatus,
+        addStudent, updateStudent, deleteStudent, toggleStudentStatus,
         addEquipment, updateEquipment, deleteEquipment,
         addStaff, toggleStaffStatus,
         simulateHardwareScan,

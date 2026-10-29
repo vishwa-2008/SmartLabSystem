@@ -62,7 +62,13 @@ export async function apiClient<T = unknown>(
   }
 
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`;
-  let response = await fetch(url, { ...fetchOptions, headers });
+  let response: Response;
+  try {
+    response = await fetch(url, { ...fetchOptions, headers });
+  } catch (err: unknown) {
+    console.error(`[apiClient] Network request failed for ${url}:`, err);
+    throw new Error(`Unable to reach Smart Lab Backend API (${API_BASE_URL}). Please verify the backend server is running on port 5000.`);
+  }
 
   // If 401 Unauthorized, attempt one token refresh and retry
   if (response.status === 401 && requireAuth) {
