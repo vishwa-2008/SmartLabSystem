@@ -27,7 +27,12 @@ export async function getValidAccessToken(): Promise<string | null> {
     const expiresAt = session.expires_at ? session.expires_at * 1000 : 0;
     if (expiresAt && Date.now() >= expiresAt - 30000) {
       const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
-      if (!refreshError && refreshed.session) {
+      if (refreshError) {
+        // Refresh token was revoked or expired (HTTP 400) — clean up stale session
+        await supabase.auth.signOut().catch(() => {});
+        return null;
+      }
+      if (refreshed.session) {
         return refreshed.session.access_token;
       }
     }
@@ -74,7 +79,9 @@ export async function apiClient<T = unknown>(
   if (response.status === 401 && requireAuth) {
     try {
       const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-      if (!refreshErr && refreshed.session?.access_token) {
+      if (refreshErr) {
+        await supabase.auth.signOut().catch(() => {});
+      } else if (refreshed.session?.access_token) {
         headers['Authorization'] = `Bearer ${refreshed.session.access_token}`;
         response = await fetch(url, { ...fetchOptions, headers });
       }
