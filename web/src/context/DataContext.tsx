@@ -303,8 +303,49 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'scan_events' },
         (payload) => {
           if (!isMounted) return;
-          setScans(prev => [payload.new as ScanEvent, ...prev.slice(0, 49)]);
+          const rawScan = payload.new as ScanEvent;
+
+          // Enrich the scan with student data by looking up template_id in local students
+          let enrichedScan = { ...rawScan };
+          if (rawScan.status === 'matched' && rawScan.student_id) {
+            // Server already found a match — look up student details from local cache
+            const studentMatch = students.find(s => s.id === rawScan.student_id);
+            if (studentMatch) {
+              enrichedScan.student = {
+                id: studentMatch.id,
+                reg_number: studentMatch.reg_number,
+                full_name: studentMatch.full_name,
+                department: studentMatch.department,
+                section: studentMatch.section,
+              };
+            }
+          } else if (rawScan.template_id && rawScan.template_id > 0) {
+            // Server couldn't find matching student — try local template_id lookup
+            // This handles race conditions where the DB row was just inserted
+            const studentMatch = students.find(
+              s => s.template_id === rawScan.template_id && s.active
+            );
+            if (studentMatch) {
+              enrichedScan = {
+                ...enrichedScan,
+                student_id: studentMatch.id,
+                status: 'matched' as const,
+                student: {
+                  id: studentMatch.id,
+                  reg_number: studentMatch.reg_number,
+                  full_name: studentMatch.full_name,
+                  department: studentMatch.department,
+                  section: studentMatch.section,
+                },
+              };
+            }
+          }
+
+          setScans(prev => [enrichedScan, ...prev.slice(0, 49)]);
           fetchStatsRef.current();
+
+          // Trigger a full refresh to get complete data sync
+          fetchAllRef.current();
         }
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'laboratories' },

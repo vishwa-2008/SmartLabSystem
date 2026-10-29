@@ -21,7 +21,7 @@
 #include <ArduinoJson.h>
 
 // --- Wi-Fi Credentials ---
-const char* WIFI_SSID     = "POCO X6 5G";
+const char* WIFI_SSID     = "VISHWA";
 const char* WIFI_PASSWORD = "1234567890";
 
 // --- Cloud Backend Configuration ---
@@ -205,16 +205,55 @@ bool sendScanEvent(int templateId, int confidence) {
                 + "\"confidence\":" + String(confidence) + ","
                 + "\"deviceId\":\"" + String(DEVICE_ID) + "\"}";
 
-  Serial.printf("\n>>> [Scan] Transmitting Scan Event -> Template ID: %d (Confidence: %d) <<<\n", templateId, confidence);
+  if (templateId > 0) {
+    Serial.printf("\n>>> [Scan] Transmitting Scan Event -> Template ID: %d (Confidence: %d) <<<\n", templateId, confidence);
+  } else {
+    Serial.println("\n>>> [Scan] Transmitting Unrecognized Fingerprint Event <<<");
+  }
 
   String response;
   bool ok = sendHttpsPost("/api/scan-event", body, response);
   if (ok) {
     Serial.println("[Scan] Match processed by cloud server!");
     Serial.println("[Scan] Server response: " + response);
-    blinkOnboardLed(2, 80);
+
+    // Parse the JSON response to give clear feedback
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, response);
+    if (!err) {
+      bool success = doc["success"] | false;
+      const char* status = doc["event"]["status"] | "unknown";
+      
+      if (success && String(status) == "matched") {
+        const char* studentName = doc["student"]["full_name"] | "";
+        const char* regNumber   = doc["student"]["reg_number"] | "";
+        const char* dept        = doc["student"]["department"] | "";
+        Serial.println("================================================================");
+        Serial.println("[Scan] *** STUDENT IDENTIFIED ***");
+        Serial.printf ("[Scan] Name      : %s\n", studentName);
+        Serial.printf ("[Scan] Reg No    : %s\n", regNumber);
+        Serial.printf ("[Scan] Department: %s\n", dept);
+        Serial.println("[Scan] Portal is now displaying student details for equipment issue.");
+        Serial.println("================================================================");
+        blinkOnboardLed(3, 100); // 3 quick blinks = success
+      } else if (String(status) == "not_found") {
+        int tplId = doc["event"]["template_id"] | templateId;
+        if (tplId > 0) {
+          Serial.println("================================================================");
+          Serial.printf ("[Scan] WARNING: Template #%d recognized by sensor but NOT linked\n", tplId);
+          Serial.println("[Scan] to any student in the database!");
+          Serial.println("[Scan] ACTION REQUIRED: Go to Students page -> click fingerprint");
+          Serial.printf ("[Scan] icon -> enter Slot #%d to link this fingerprint.\n", tplId);
+          Serial.println("================================================================");
+        } else {
+          Serial.println("[Scan] Unrecognized finger — not enrolled in sensor database.");
+        }
+        blinkOnboardLed(1, 500); // 1 long blink = not found
+      }
+    }
   } else {
-    Serial.println("[Scan] Server failed to record scan.");
+    Serial.println("[Scan] ERROR: Server failed to record scan. Check network/token.");
+    blinkOnboardLed(2, 250);
   }
   return ok;
 }
@@ -244,7 +283,9 @@ void handleFingerprintScanning() {
     Serial.printf("\n[Scan] Match Found! Template ID: #%d (Confidence: %d)\n", finger.fingerID, finger.confidence);
     sendScanEvent(finger.fingerID, finger.confidence);
   } else if (p == FINGERPRINT_NOTFOUND) {
-    Serial.println("\n[Scan] Fingerprint not recognized (Unregistered student).");
+    Serial.println("\n[Scan] Fingerprint NOT recognized — student is not enrolled on this sensor.");
+    Serial.println("[Scan] Ask the student to enroll via the Lab Portal first.");
+    // Send 0 so server logs it as unrecognized (server now accepts templateId=0)
     sendScanEvent(0, 0);
   } else {
     Serial.println("[Scan] Sensor search error.");

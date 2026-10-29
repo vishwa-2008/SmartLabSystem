@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -16,7 +16,8 @@ import {
   RefreshCw,
   AlertTriangle,
   History,
-  Sparkles
+  Sparkles,
+  Volume2
 } from 'lucide-react';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
@@ -36,25 +37,93 @@ export default function ScanStudentPage() {
   const [matchedStudent, setMatchedStudent] = useState<Student | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simTemplateId, setSimTemplateId] = useState(1);
-  const [pollingActive, setPollingActive] = useState(true);
+  const [autoNavCountdown, setAutoNavCountdown] = useState<number | null>(null);
+  const [scanNotification, setScanNotification] = useState<string | null>(null);
+  const lastProcessedScanRef = useRef<string | null>(null);
+  const autoNavTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Sync with recent scans from context
-  useEffect(() => {
-    if (scans && scans.length > 0) {
-      const topScan = scans[0];
-      setLatestScan(topScan);
+  // ─── CORE: Student matching logic ──────────────────────────────────
+  const findStudentForScan = useCallback((scan: ScanEvent): Student | null => {
+    if (!scan) return null;
 
-      if (topScan.student_id) {
-        const found = students.find(s => s.id === topScan.student_id);
-        setMatchedStudent(found || (topScan.student as Student) || null);
-      } else if (topScan.status === 'matched') {
-        const found = students.find(s => s.template_id === topScan.template_id);
-        setMatchedStudent(found || null);
-      } else {
-        setMatchedStudent(null);
-      }
+    // Strategy 1: Use student_id from scan event (server already matched)
+    if (scan.student_id) {
+      const found = students.find(s => s.id === scan.student_id);
+      if (found) return found;
     }
-  }, [scans, students]);
+
+    // Strategy 2: Use embedded student object from scan event
+    if (scan.student && scan.student.id) {
+      const found = students.find(s => s.id === scan.student.id);
+      if (found) return found;
+    }
+
+    // Strategy 3: Match by template_id in local students list
+    // This is the KEY fix — even if server returns "not_found" because
+    // fingerprint_templates row is missing, we can still match locally
+    // if the student has template_id set via manual slot mapping
+    if (scan.template_id && scan.template_id > 0) {
+      const found = students.find(
+        s => s.template_id === scan.template_id && s.active
+      );
+      if (found) return found;
+    }
+
+    return null;
+  }, [students]);
+
+  // ─── SYNC: Process new scans from context ─────────────────────────
+  useEffect(() => {
+    if (!scans || scans.length === 0) return;
+
+    const topScan = scans[0];
+    // Only process if this is a genuinely new scan we haven't seen
+    if (topScan.id === lastProcessedScanRef.current) return;
+
+    lastProcessedScanRef.current = topScan.id;
+    setLatestScan(topScan);
+
+    const student = findStudentForScan(topScan);
+    setMatchedStudent(student);
+
+    // Clear any existing auto-nav
+    if (autoNavTimerRef.current) clearTimeout(autoNavTimerRef.current);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    setAutoNavCountdown(null);
+
+    if (student) {
+      // Show notification
+      setScanNotification(`✅ Student verified: ${student.full_name} (${student.reg_number})`);
+
+      // Auto-navigate to issue page after 5 seconds
+      let countdown = 5;
+      setAutoNavCountdown(countdown);
+      countdownTimerRef.current = setInterval(() => {
+        countdown--;
+        setAutoNavCountdown(countdown);
+        if (countdown <= 0) {
+          if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+        }
+      }, 1000);
+
+      autoNavTimerRef.current = setTimeout(() => {
+        router.push(`/issue?studentId=${student.id}`);
+      }, 5000);
+    } else if (topScan.template_id && topScan.template_id > 0) {
+      setScanNotification(`⚠️ Fingerprint Slot #${topScan.template_id} detected but not linked to any student. Please map the slot in Students page.`);
+    } else {
+      setScanNotification(null);
+    }
+  }, [scans, findStudentForScan, router]);
+
+  // Cleanup timers on unmount
+  useEffect(() => {
+    return () => {
+      if (autoNavTimerRef.current) clearTimeout(autoNavTimerRef.current);
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    };
+  }, []);
 
   // Check if student has outstanding equipment
   const activeStudentLoans = matchedStudent
@@ -62,6 +131,12 @@ export default function ScanStudentPage() {
     : [];
 
   const hasOverdueLoans = activeStudentLoans.some(t => new Date(t.due_at) < new Date());
+
+  const cancelAutoNav = () => {
+    if (autoNavTimerRef.current) clearTimeout(autoNavTimerRef.current);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    setAutoNavCountdown(null);
+  };
 
   const handleTestScan = async (tid: number) => {
     setIsSimulating(true);
@@ -114,6 +189,29 @@ export default function ScanStudentPage() {
           </div>
         </div>
 
+        {/* Scan Notification Banner */}
+        {scanNotification && (
+          <div className={`p-3 rounded-lg border text-sm font-medium flex items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-300 ${
+            matchedStudent
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}>
+            <Volume2 className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{scanNotification}</span>
+            {autoNavCountdown !== null && autoNavCountdown > 0 && (
+              <span className="text-xs font-mono bg-white px-2 py-0.5 rounded border border-emerald-200 text-emerald-700">
+                Auto-redirect in {autoNavCountdown}s
+              </span>
+            )}
+            <button
+              onClick={() => { setScanNotification(null); cancelAutoNav(); }}
+              className="text-xs hover:underline opacity-70"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Central Scan Detection Stage */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left Column: Visual Scanner Stage */}
@@ -163,16 +261,25 @@ export default function ScanStudentPage() {
                     <p className="text-xs text-slate-500 mt-2">
                       Template #{latestScan?.template_id} • Device {latestScan?.device_id || 'esp32-lab-01'}
                     </p>
+                    <p className="text-sm font-bold text-emerald-800 mt-1">
+                      {matchedStudent.full_name}
+                    </p>
                   </div>
-                ) : latestScan?.status === 'not_found' ? (
+                ) : latestScan && !matchedStudent && latestScan.template_id && latestScan.template_id > 0 ? (
                   <div className="space-y-1">
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-800">
                       <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
-                      No Matching Student
+                      Fingerprint Not Linked
                     </span>
                     <p className="text-xs text-slate-500 mt-2">
-                      Sensor slot #{latestScan.template_id} not mapped to any registered student.
+                      Sensor slot #{latestScan.template_id} detected but not mapped to any student.
                     </p>
+                    <Link
+                      href="/students"
+                      className="text-xs text-[#1B4998] hover:underline font-semibold mt-1 inline-block"
+                    >
+                      Go to Students → Map Fingerprint Slot
+                    </Link>
                   </div>
                 ) : (
                   <div className="space-y-1">
@@ -299,22 +406,49 @@ export default function ScanStudentPage() {
                     )}
                   </div>
 
+                  {/* Auto-Navigate Countdown Banner */}
+                  {autoNavCountdown !== null && autoNavCountdown > 0 && (
+                    <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ArrowRight className="w-4 h-4 text-blue-600 animate-pulse" />
+                        <span>
+                          Redirecting to <strong>Issue Equipment</strong> page in <strong>{autoNavCountdown}</strong> seconds...
+                        </span>
+                      </div>
+                      <button
+                        onClick={cancelAutoNav}
+                        className="text-blue-700 hover:underline font-semibold"
+                      >
+                        Stay Here
+                      </button>
+                    </div>
+                  )}
+
                   {/* Primary CTA: Proceed to Issue */}
                   <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
                     <Button
-                      onClick={() => router.push(`/issue?studentId=${matchedStudent.id}`)}
+                      onClick={() => {
+                        cancelAutoNav();
+                        router.push(`/issue?studentId=${matchedStudent.id}`);
+                      }}
                       className="w-full sm:flex-1 bg-[#1B4998] hover:bg-[#143775] text-white py-2.5 font-bold shadow-md flex items-center justify-center gap-2"
                     >
                       <PackagePlus className="w-4 h-4" />
                       Proceed to Issue Equipment
+                      {autoNavCountdown !== null && autoNavCountdown > 0 && (
+                        <span className="ml-1 text-xs opacity-80">({autoNavCountdown}s)</span>
+                      )}
                       <ArrowRight className="w-4 h-4" />
                     </Button>
 
                     <Button
                       variant="outline"
                       onClick={() => {
+                        cancelAutoNav();
                         setMatchedStudent(null);
                         setLatestScan(null);
+                        setScanNotification(null);
+                        lastProcessedScanRef.current = null;
                       }}
                       className="w-full sm:w-auto text-xs"
                     >
@@ -331,11 +465,24 @@ export default function ScanStudentPage() {
                     <User className="w-8 h-8" />
                   </div>
                   <h3 className="text-base font-bold text-slate-800">
-                    No Verified Student Present
+                    {latestScan && !matchedStudent && latestScan.template_id && latestScan.template_id > 0
+                      ? 'Fingerprint Slot Not Mapped'
+                      : 'No Verified Student Present'}
                   </h3>
-                  <p className="text-sm text-slate-500 max-w-md mt-1 mb-6">
-                    When a student presses their finger on the lab scanner, their verified profile, academic credentials, and loan history will appear here instantly for staff verification.
+                  <p className="text-sm text-slate-500 max-w-md mt-1 mb-4">
+                    {latestScan && !matchedStudent && latestScan.template_id && latestScan.template_id > 0
+                      ? `Sensor detected Slot #${latestScan.template_id} but this slot is not linked to any registered student in the database. Use the Students page to map fingerprint slots.`
+                      : 'When a student presses their finger on the lab scanner, their verified profile, academic credentials, and loan history will appear here instantly for staff verification.'}
                   </p>
+                  {latestScan && !matchedStudent && latestScan.template_id && latestScan.template_id > 0 ? (
+                    <Link
+                      href="/students"
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-[#1B4998] text-white text-xs font-semibold rounded-lg hover:bg-[#143775] transition-colors mb-4"
+                    >
+                      <Fingerprint className="w-3.5 h-3.5" />
+                      Go to Students → Map Slot #{latestScan.template_id}
+                    </Link>
+                  ) : null}
                   <div className="flex items-center gap-2 text-xs text-slate-400">
                     <Activity className="w-3.5 h-3.5 animate-pulse text-[#1B4998]" />
                     <span>Listening for realtime sensor events on WebSocket...</span>

@@ -186,9 +186,10 @@ app.post("/api/scan-event", async (req, res) => {
 
     const templateId = req.body?.templateId;
 
+    // Allow templateId=0 for unrecognized fingerprint scans from ESP32
     if (
         !Number.isSafeInteger(templateId) ||
-        templateId < 1 ||
+        templateId < 0 ||
         templateId > 1000000
     ) {
         return res.status(400).json({
@@ -198,12 +199,14 @@ app.post("/api/scan-event", async (req, res) => {
 
     const isTest = Boolean(req.body?.isTest);
     const deviceId = String(req.body?.deviceId || "esp32-lab-01");
+    const confidence = Number(req.body?.confidence || 0);
 
     try {
         let studentId = null;
         let status = "not_found";
 
-        if (isSupabaseConfigured) {
+        if (isSupabaseConfigured && templateId > 0) {
+            // Look up fingerprint_templates for this template_id
             const { data: mapping, error: lookupError } =
                 await supabase
                     .from("fingerprint_templates")
@@ -238,7 +241,12 @@ app.post("/api/scan-event", async (req, res) => {
                 if (student) {
                     studentId = student.id;
                     status = "matched";
+                    console.log(`[Scan] Matched Template #${templateId} -> Student ${studentId} (Confidence: ${confidence})`);
+                } else {
+                    console.log(`[Scan] Template #${templateId} linked to student ${mapping.student_id} but student is inactive`);
                 }
+            } else {
+                console.log(`[Scan] Template #${templateId} NOT found in fingerprint_templates table — slot is not linked to any student`);
             }
 
             // Fetch full student details for the response
@@ -252,6 +260,7 @@ app.post("/api/scan-event", async (req, res) => {
                 studentDetails = sd || null;
             }
 
+            // Insert the scan event with full data so Realtime subscribers get complete info
             const { data: event, error: insertError } =
                 await supabase
                     .from("scan_events")
@@ -262,7 +271,7 @@ app.post("/api/scan-event", async (req, res) => {
                         device_id: deviceId,
                         is_test: isTest
                     })
-                    .select("id, template_id, status, created_at")
+                    .select("id, template_id, student_id, status, device_id, is_test, created_at")
                     .single();
 
             if (insertError) {
@@ -277,6 +286,35 @@ app.post("/api/scan-event", async (req, res) => {
                 success: true,
                 event,
                 student: studentDetails
+            });
+        } else if (isSupabaseConfigured && templateId === 0) {
+            // Unrecognized fingerprint (ESP32 sends templateId=0 when finger is not in sensor DB)
+            const { data: event, error: insertError } =
+                await supabase
+                    .from("scan_events")
+                    .insert({
+                        template_id: 0,
+                        student_id: null,
+                        status: "not_found",
+                        device_id: deviceId,
+                        is_test: isTest
+                    })
+                    .select("id, template_id, student_id, status, device_id, is_test, created_at")
+                    .single();
+
+            if (insertError) {
+                console.error("Scan insert failed:", insertError.message);
+                return res.status(500).json({
+                    error: "Could not record scan"
+                });
+            }
+
+            console.log("[Scan] Unrecognized fingerprint (template_id=0) — finger is not enrolled on sensor");
+            inMemoryState.lastScanEvent = { ...event, student: null };
+            return res.status(201).json({
+                success: true,
+                event,
+                student: null
             });
         } else {
             // Local test fallback (Supabase not configured)
@@ -486,6 +524,8 @@ app.post("/api/device/enrollment-complete", async (req, res) => {
 
         if (status === "enrolled" && isSupabaseConfigured) {
             try {
+                const enrolledTemplateId = templateId || session.targetTemplateId;
+
                 // Delete previous template for student to enforce unique_active_student_fingerprint
                 await supabase
                     .from("fingerprint_templates")
@@ -494,13 +534,13 @@ app.post("/api/device/enrollment-complete", async (req, res) => {
 
                 // Insert newly enrolled template
                 await supabase.from("fingerprint_templates").insert({
-                    template_id: templateId || session.targetTemplateId,
+                    template_id: enrolledTemplateId,
                     student_id: session.studentId,
                     active: true,
                     device_id: "esp32-lab-01"
                 });
 
-                console.log(`[Enrollment] Successfully linked Slot #${templateId || session.targetTemplateId} to student ${session.studentId}`);
+                console.log(`[Enrollment] Successfully linked Slot #${enrolledTemplateId} to student ${session.studentId}`);
             } catch (err) {
                 console.error("Failed to persist enrolled template:", err.message);
             }
@@ -1221,10 +1261,28 @@ app.patch("/api/students/:id", requireAuth, async (req, res) => {
             details: { ...updates, template_id }
         });
 
+        // Fetch current fingerprint status for the response
+        let currentTemplateId = null;
+        let currentFpEnrolled = false;
+        if (hasTemplateUpdate) {
+            currentTemplateId = activeTid;
+            currentFpEnrolled = activeTid !== null;
+        } else {
+            // Fetch from DB to return accurate current fingerprint info
+            const { data: fpRow } = await supabase
+                .from("fingerprint_templates")
+                .select("template_id")
+                .eq("student_id", req.params.id)
+                .eq("active", true)
+                .maybeSingle();
+            currentTemplateId = fpRow?.template_id ?? null;
+            currentFpEnrolled = currentTemplateId !== null;
+        }
+
         return res.json({
             ...student,
-            template_id: activeTid !== null ? activeTid : undefined,
-            fingerprint_enrolled: activeTid !== null
+            template_id: currentTemplateId,
+            fingerprint_enrolled: currentFpEnrolled
         });
     } catch (err) {
         return res.status(500).json({ error: "Failed to update student: " + (err.message || "") });
